@@ -1,0 +1,21 @@
+{
+  "id": "synthetic-hh5k-tx",
+  "version": "fixture-1",
+  "source": {
+    "name": "sanitized-source.ini",
+    "text": "[{{section}}]\nMEASURE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|{{parameters}}|{{criteria}}|*V:STATION-Timeout#|NEXT|FAIL|\n"
+  },
+  "corrected": {
+    "name": "reviewed-copy.ini",
+    "text": "[{{section}}]\nMEASURE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|{{parameters}}|{{criteria}}|*V:STATION-Timeout#|NEXT|FAIL|\"\n"
+  },
+  "corrections": [
+    {
+      "before": "|NEXT|FAIL|\n",
+      "after": "|NEXT|FAIL|\"\n",
+      "evidence": "Synthetic parser fixture: add the missing final quote; not approval of any original station source."
+    }
+  ],
+  "unresolved_questions": [],
+  "approval": null
+}

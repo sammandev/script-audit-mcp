@@ -1,0 +1,14 @@
+[package]
+name = "script-checker"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "script_checker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "script-checker"
+path = "src/main.rs"
+
+[dependencies]

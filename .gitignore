@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Generated tool output
+/graphify-out
+/.codegraph
+
+# Environment / secrets (database credentials live outside the repo)
+.env
+.env.*
+
+# Editors / OS junk
+.idea
+.vscode
+Thumbs.db
+.DS_Store
+
+# Local working files
+.omo
+.rtk
+.scratch
+.dev-reference
+
+# Internal docs (not published)
+/docs
+CONTEXT.md
