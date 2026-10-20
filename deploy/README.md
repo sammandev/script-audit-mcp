@@ -14,11 +14,12 @@ The agent does not access the host or connect to a database.
 | Existing PostgreSQL | Existing host configuration; no engine installation or migrations |
 
 The operator selected systemd + Nginx, plain HTTP, and no authentication.
-Anyone in the allowed client ranges can invoke every MCP tool. Scripts and
-results travel unencrypted. Network allowlisting and Host/Origin checks do not
-provide user identity, authorization, or protection against an allowed malicious
-client. Obtain company-policy approval before exposing the listener. Do not
-publish or forward this port to the internet.
+There is no per-client IP allowlist in this Nginx site. Anyone who can reach
+the endpoint can invoke every MCP tool. Scripts and results travel unencrypted.
+Host/Origin checks do not provide user identity, authorization, or protection
+against a reachable malicious client. Obtain company-policy approval and keep
+the endpoint LAN/VPN-only through network/firewall policy. Do not publish or
+forward this port to the internet.
 
 These ports are proposals, not verified free ports. They avoid the documented
 web application ports. Keep the existing web deployment, Nginx sites, database,
@@ -128,13 +129,14 @@ sudo test ! -e /etc/nginx/sites-available/script-audit-mcp && sudo test ! -L /et
 If the guarded install fails, stop before `sudoedit`. Inspect the existing path
 and confirm ownership; use the update procedure only for this MCP deployment.
 
-Add approved client IPs or LAN/VPN CIDRs as `allow ...;` entries immediately
-before `deny all;`. Obtain the ranges from the network administrator; the
-server's IP does not establish its subnet or VPN client ranges. The template
-initially permits only host-local smoke checks. Do not add `allow all;`, broad
-private-address ranges, or forwarded-header-based trust. This site is a direct
-LAN entry point, not an upstream-proxy configuration. Check for global Nginx
-`real_ip`/`satisfy` overrides that could change address filtering.
+The site has no `allow`/`deny` rules, so users do not need individual IP
+registration. For an existing installation made from the earlier template,
+back up the installed site and remove its `allow ...;` and `deny all;` lines
+with `sudoedit`, leaving the Host/Origin maps and loopback upstream unchanged.
+Do not add `allow all;` to override inherited restrictions. Check for inherited
+Nginx access rules with the host administrator rather than changing global
+policy. This site is a direct LAN entry point; company firewall/routing policy
+must keep it off the internet.
 
 The `map` blocks must stay in the Nginx `http` context. The exact allowed Host
 is `10.176.2.139:39064`. A missing Origin is allowed for desktop/CLI clients;
@@ -151,9 +153,12 @@ sudo ss -ltnp | grep -E ':(39064|39065)\b'
 ```
 
 Run reload only after `nginx -t` succeeds. Have the network administrator allow
-TCP 39064 only from those same approved sources in existing host/upstream
-firewall policy. Never expose 39065, enable a firewall blindly, or flush rules.
-No client authentication headers or tokens are needed.
+TCP 39064 for the intended LAN/VPN network under existing host/upstream firewall
+policy, without registering each user in this site. Network reachability is
+still required. Never expose 39065, enable a firewall blindly, or flush rules.
+No client authentication headers or tokens are needed. Removing source-IP
+filtering does not fix a corporate HTTP proxy rejection; clients need an
+approved direct route/proxy bypass or an approved proxy configuration.
 
 ## Operator Verification
 
@@ -202,10 +207,11 @@ curl --noproxy '*' --max-time 10 -sS -o /dev/null -w '%{http_code}\n' "$MCP_URL"
 curl --noproxy '*' --max-time 10 -sS -o /dev/null -w '%{http_code}\n' "$MCP_URL" -H 'Host: untrusted.invalid'
 ```
 
-From a reachable but non-allowlisted test workstation, `/mcp` must receive 403
-(or be blocked by the network firewall). From any remote workstation, 39065
-must be unreachable. Check the existing web application still works. Restarts
-discard in-memory MCP sessions; clients must initialize again after HTTP 404.
+Repeat initialization and tool discovery from another intended LAN/VPN client
+without adding its IP to Nginx. From any remote workstation, 39065 must be
+unreachable, and the network firewall must prevent public-internet access to
+39064. Check the existing web application still works. Restarts discard
+in-memory MCP sessions; clients must initialize again after HTTP 404.
 
 ## Client Configuration
 
@@ -276,9 +282,9 @@ sudo mv /opt/script-audit-mcp/bin/script-audit-mcp.next /opt/script-audit-mcp/bi
 sudo systemctl restart script-audit-mcp
 ```
 
-Repeat the protocol, allowlist, and existing-web checks. If updating the unit,
+Repeat the protocol, network-exposure, and existing-web checks. If updating the unit,
 run `systemd-analyze verify` and `systemctl daemon-reload` before restart. If
-updating Nginx, retain the local allowlist and run `nginx -t` before reload.
+updating Nginx, retain local approved settings and run `nginx -t` before reload.
 
 On failure, stop this MCP service, restore the backed-up binary/configuration,
 verify the unit and Nginx syntax, run daemon-reload if necessary, and start the

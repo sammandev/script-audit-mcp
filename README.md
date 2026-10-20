@@ -41,14 +41,14 @@ Streamable HTTP endpoint; see [HTTP hosting on Ubuntu](#http-hosting-on-ubuntu).
 `--http` starts the MCP Streamable HTTP listener; `--host` and `--port` select
 the bind address (CLI default `127.0.0.1:8080`, endpoint `/mcp`). The Ubuntu
 systemd unit instead binds `127.0.0.1:39065`; Nginx exposes
-`http://10.176.2.139:39064/mcp` to explicitly allowed LAN/VPN clients.
+`http://10.176.2.139:39064/mcp` without per-client IP registration.
 
-The current operator choice is **plain HTTP without authentication**. Every
-allowed client can invoke every MCP tool, and request/response contents are
-unencrypted. Host and Origin checks do not authenticate callers. Company-policy
-approval and an explicit client IP/CIDR allowlist are deployment prerequisites;
-the supplied Nginx template denies remote clients until that list is configured.
-Database credentials stay in the server environment.
+The current operator choice is **plain HTTP without authentication or a Nginx
+client-IP allowlist**. Every client that can reach the endpoint can invoke every
+MCP tool, and request/response contents are unencrypted. Host and Origin checks
+do not authenticate callers. Company-policy approval and LAN/VPN-only network
+exposure remain deployment prerequisites; firewall/routing policy must prevent
+internet access. Database credentials stay in the server environment.
 
 Follow [the Ubuntu deployment runbook](deploy/README.md) for prerequisites,
 protected environment configuration, installation, session-aware smoke checks,
