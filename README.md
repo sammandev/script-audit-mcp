@@ -1,6 +1,6 @@
 # Script Audit
 
-Rust MCP server for function discovery and validated test-script composition. The transport is stdio. The server reads the shared PostgreSQL function catalog and never creates a database, runs migrations, or changes catalog rows.
+Rust MCP server for function discovery and validated test-script composition. The default transport is stdio; `--http` serves the MCP Streamable HTTP transport. The server reads the shared PostgreSQL function catalog and never creates a database, runs migrations, or changes catalog rows.
 
 ## Database configuration
 
@@ -33,7 +33,71 @@ Existing MCP clients must update their command and project-specific database URL
 }
 ```
 
-HTTP/SSE is not implemented. Stdio clients launch the process themselves.
+Stdio clients launch the process themselves. HTTP clients connect to the
+Streamable HTTP endpoint; see [HTTP hosting on Ubuntu](#http-hosting-on-ubuntu).
+
+## HTTP Hosting On Ubuntu
+
+`--http` starts the MCP Streamable HTTP listener; `--host` and `--port` select
+the bind address (default `127.0.0.1:8080`, endpoint `/mcp`). Database
+credentials stay in the server environment; HTTP clients never receive them.
+
+Build on Ubuntu 22.04 or 24.04. Native TLS needs the OpenSSL development
+headers, `pkg-config`, and a C toolchain; Rust 1.88 or newer is required:
+
+```sh
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo build --release   # binary: target/release/script-audit-mcp
+```
+
+`deploy/script-audit-mcp.service` is a hardened systemd unit and
+`deploy/script-audit-mcp.env.example` is the matching environment template.
+Install layout:
+
+```sh
+sudo useradd --system --home /opt/script-audit-mcp --shell /usr/sbin/nologin script-audit
+sudo mkdir -p /opt/script-audit-mcp/bin /opt/script-audit-mcp/etc
+sudo install -m 0755 target/release/script-audit-mcp /opt/script-audit-mcp/bin/
+sudo install -m 0640 deploy/script-audit-mcp.env.example /opt/script-audit-mcp/etc/script-audit-mcp.env
+sudo chown -R root:script-audit /opt/script-audit-mcp/etc
+sudoedit /opt/script-audit-mcp/etc/script-audit-mcp.env   # fill in the real database credentials
+sudo install -m 0644 deploy/script-audit-mcp.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now script-audit-mcp
+```
+
+The unit runs `--http --host 127.0.0.1 --port 8080`. To expose the server on
+the local network, change `--host` to the interface address (for example
+`0.0.0.0`) in the installed unit and allow the port in the firewall. The
+transport is plain HTTP; put a TLS-terminating reverse proxy in front when the
+network is untrusted. Sessions are held in memory: restarting the service
+drops client sessions and clients reinitialize.
+
+Smoke test without an MCP client:
+
+```sh
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
+```
+
+HTTP client configuration replaces the stdio `command` entry with the server URL:
+
+```json
+{
+  "mcpServers": {
+    "script-audit-mcp": {
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+Deployment remains a manual, user-run release; the agent does not access
+Ubuntu or connect to any database.
 
 ## Tools
 
@@ -945,10 +1009,10 @@ Rust 1.88 or newer is required. Default features include PostgreSQL and MCP, wit
 On a user-approved test machine, outside the restricted Windows host, set `TEST_DATABASE_URL` and its password source before running:
 
 ```sh
-rtk cargo fmt --all -- --check
-rtk cargo test --all-targets
-rtk cargo clippy --all-targets -- -D warnings
-rtk cargo build --release
+cargo fmt --all -- --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
 
 The PostgreSQL fixture creates and cleans up a uniquely named schema. It verifies that actual catalog reads use read-only repeatable-read transactions and correctly decode BIGINT fields and NULLs. A missing test URL is an error. Database-backed fixture execution and stdio startup have not been run locally. Handshake, discovery, and dispatch of all eight tools are tested over an in-memory transport.
@@ -956,10 +1020,10 @@ The PostgreSQL fixture creates and cleans up a uniquely named schema. It verifie
 On this Windows host, run only database-free tests, with all database features disabled:
 
 ```powershell
-rtk cargo fmt --all -- --check
-rtk cargo check --no-default-features --features mcp --all-targets
-rtk cargo test --no-default-features --features mcp --all-targets
-rtk cargo clippy --no-default-features --features mcp --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo check --no-default-features --features mcp --all-targets
+cargo test --no-default-features --features mcp --all-targets
+cargo clippy --no-default-features --features mcp --all-targets -- -D warnings
 ```
 
 These commands pass on the selected MSVC Windows toolchain. An older GNU setup
@@ -971,4 +1035,4 @@ No database test or database connection is permitted locally.
 
 Deployment and the SQLite transfer are manual. The agent does not access Ubuntu or connect to either database. Follow the web repository's `docs/postgresql-migration.md`, verify the shared PostgreSQL catalog, then deploy this binary and update the client's environment. Preserve the old binary and SQLite data for rollback before application writes resume.
 
-See [the script contract](docs/adr/0001-script-contract-and-validation.md), [the verification boundary](docs/adr/0002-off-machine-database-verification.md), and [the PostgreSQL reader decision](docs/adr/0003-postgresql-catalog.md).
+See [the script contract](docs/adr/0001-script-contract-and-validation.md), [the verification boundary](docs/adr/0002-off-machine-database-verification.md), [the PostgreSQL reader decision](docs/adr/0003-postgresql-catalog.md), and [the HTTP transport decision](docs/adr/0004-http-transport.md).

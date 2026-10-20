@@ -1,0 +1,47 @@
+# Script Audit MCP server over the MCP Streamable HTTP transport.
+# Install to /etc/systemd/system/script-audit-mcp.service, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now script-audit-mcp
+
+[Unit]
+Description=Script Audit MCP server (Streamable HTTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=script-audit
+Group=script-audit
+EnvironmentFile=/opt/script-audit-mcp/etc/script-audit-mcp.env
+ExecStart=/opt/script-audit-mcp/bin/script-audit-mcp --http --host 127.0.0.1 --port 8080
+# Expose on the local network instead of loopback by editing --host above
+# (for example 0.0.0.0) and allowing the port in the firewall.
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening: read-only filesystem, no privileges, network only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
