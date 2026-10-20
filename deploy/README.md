@@ -145,6 +145,12 @@ including `null`, receive 403. No wildcard CORS headers are supplied. If a
 client sends an unexpected Origin, inspect it and approve that exact origin
 before changing the map; never accept arbitrary origins.
 
+After validating the public Host, Nginx forwards `Host: 127.0.0.1:39065` using
+`proxy_set_header Host $proxy_host;`. rmcp's default Host validation accepts
+loopback hosts; forwarding the public `$http_host` instead causes
+`Forbidden: Host header is not allowed`. Keep both the public Host map and
+the upstream Host rewrite. Do not disable rmcp's Host validation.
+
 ```sh
 sudo ln -s /etc/nginx/sites-available/script-audit-mcp /etc/nginx/sites-enabled/script-audit-mcp
 sudo nginx -t
