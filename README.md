@@ -39,65 +39,22 @@ Streamable HTTP endpoint; see [HTTP hosting on Ubuntu](#http-hosting-on-ubuntu).
 ## HTTP Hosting On Ubuntu
 
 `--http` starts the MCP Streamable HTTP listener; `--host` and `--port` select
-the bind address (default `127.0.0.1:8080`, endpoint `/mcp`). Database
-credentials stay in the server environment; HTTP clients never receive them.
+the bind address (CLI default `127.0.0.1:8080`, endpoint `/mcp`). The Ubuntu
+systemd unit instead binds `127.0.0.1:39065`; Nginx exposes
+`http://10.176.2.139:39064/mcp` to explicitly allowed LAN/VPN clients.
 
-Build on Ubuntu 22.04 or 24.04. Native TLS needs the OpenSSL development
-headers, `pkg-config`, and a C toolchain; Rust 1.88 or newer is required:
+The current operator choice is **plain HTTP without authentication**. Every
+allowed client can invoke every MCP tool, and request/response contents are
+unencrypted. Host and Origin checks do not authenticate callers. Company-policy
+approval and an explicit client IP/CIDR allowlist are deployment prerequisites;
+the supplied Nginx template denies remote clients until that list is configured.
+Database credentials stay in the server environment.
 
-```sh
-sudo apt update
-sudo apt install -y build-essential pkg-config libssl-dev
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-cargo build --release   # binary: target/release/script-audit-mcp
-```
-
-`deploy/script-audit-mcp.service` is a hardened systemd unit and
-`deploy/script-audit-mcp.env.example` is the matching environment template.
-Install layout:
-
-```sh
-sudo useradd --system --home /opt/script-audit-mcp --shell /usr/sbin/nologin script-audit
-sudo mkdir -p /opt/script-audit-mcp/bin /opt/script-audit-mcp/etc
-sudo install -m 0755 target/release/script-audit-mcp /opt/script-audit-mcp/bin/
-sudo install -m 0640 deploy/script-audit-mcp.env.example /opt/script-audit-mcp/etc/script-audit-mcp.env
-sudo chown -R root:script-audit /opt/script-audit-mcp/etc
-sudoedit /opt/script-audit-mcp/etc/script-audit-mcp.env   # fill in the real database credentials
-sudo install -m 0644 deploy/script-audit-mcp.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now script-audit-mcp
-```
-
-The unit runs `--http --host 127.0.0.1 --port 8080`. To expose the server on
-the local network, change `--host` to the interface address (for example
-`0.0.0.0`) in the installed unit and allow the port in the firewall. The
-transport is plain HTTP; put a TLS-terminating reverse proxy in front when the
-network is untrusted. Sessions are held in memory: restarting the service
-drops client sessions and clients reinitialize.
-
-Smoke test without an MCP client:
-
-```sh
-curl -sS http://127.0.0.1:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
-```
-
-HTTP client configuration replaces the stdio `command` entry with the server URL:
-
-```json
-{
-  "mcpServers": {
-    "script-audit-mcp": {
-      "url": "http://127.0.0.1:8080/mcp"
-    }
-  }
-}
-```
-
-Deployment remains a manual, user-run release; the agent does not access
-Ubuntu or connect to any database.
+Follow [the Ubuntu deployment runbook](deploy/README.md) for prerequisites,
+protected environment configuration, installation, session-aware smoke checks,
+VS Code/OpenCode/Claude Code setup, and rollback. This deployment neither
+installs a database engine nor changes the catalog schema. Deployment remains
+manual and user-run; the agent does not access Ubuntu or any database.
 
 ## Tools
 

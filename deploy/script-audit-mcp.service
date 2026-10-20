@@ -12,9 +12,8 @@ Type=simple
 User=script-audit
 Group=script-audit
 EnvironmentFile=/opt/script-audit-mcp/etc/script-audit-mcp.env
-ExecStart=/opt/script-audit-mcp/bin/script-audit-mcp --http --host 127.0.0.1 --port 8080
-# Expose on the local network instead of loopback by editing --host above
-# (for example 0.0.0.0) and allowing the port in the firewall.
+ExecStart=/opt/script-audit-mcp/bin/script-audit-mcp --http --host 127.0.0.1 --port 39065
+# Keep this listener private; deploy/nginx.conf owns LAN access controls.
 
 Restart=on-failure
 RestartSec=5
