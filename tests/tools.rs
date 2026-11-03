@@ -7268,6 +7268,36 @@ async fn bundle_review_regression_exposes_deferred_checks_and_rejected_row_locat
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn program2_hh5k_outer_quotes_preserve_embedded_sfis_payload() -> Result<()> {
+    let text = concat!(
+        "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
+        "PASS_Stop=\"SFIS|WRITE_DATA_TO_SFIS|\"TSP_CheckRoute\",1,TSP_CheckRoute PASS|TRUE|NULL|QUIT|FAIL\"\n"
+    );
+    let report = bundle_report(bundle_arguments(text)).await?;
+    assert_eq!(report["layers"]["structure"], "valid", "{report}");
+    assert_eq!(report["source_files"][0]["text"], text);
+    assert_eq!(
+        report["script_sections"][0]["rows"][0]["parameters"],
+        "\"TSP_CheckRoute\",1,TSP_CheckRoute PASS"
+    );
+    let mut legacy = bundle_arguments(text);
+    legacy["dialect"] = "checker_legacy".into();
+    assert_eq!(
+        bundle_report(legacy).await?["layers"]["structure"],
+        "invalid"
+    );
+    for malformed in [
+        text.replace("|QUIT|FAIL\"", "|QUIT|FAIL"),
+        text.replace("TSP_CheckRoute\",1", "TSP|Check|Route\",1"),
+    ] {
+        let report = bundle_report(bundle_arguments(&malformed)).await?;
+        assert_eq!(report["layers"]["structure"], "invalid", "{report}");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_checks_selected_flow_local_labels_and_exact_tokens() -> Result<()> {
     let text = concat!(
         "; retained alternative\n[TEST FLOW:Normal]\nRUN = \"RUN\"\n",

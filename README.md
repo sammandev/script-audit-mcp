@@ -153,7 +153,11 @@ positive timeout required by `compose_line`. Known dispatch suffixes are upperca
 eighth field is allowed. Nonempty codes require `ERRCODE:<token>` or
 `ErrorCode:<token>` syntax, case-insensitively; their meaning remains opaque.
 Five-field rows and extra fields are incompatible with strict bundle syntax.
-No escaping scheme is defined for embedded quotes or pipes.
+HH5K assignment values use their first and last double quotes as the outer
+wrapper; embedded double quotes are preserved as literal payload bytes. A missing
+outer closing quote remains invalid. This is not a pipe-escaping scheme or proof
+of SFIS argument semantics. `checker_legacy` retains its strict embedded-quote
+diagnostic, and the original single-line tool contracts are unchanged.
 
 Control tokens are exact uppercase `NEXT`, `QUIT`, `FAIL`, `PASS`, and `END`.
 Names containing those words are ordinary section-local labels. Labels follow the

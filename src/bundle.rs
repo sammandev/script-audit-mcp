@@ -378,7 +378,7 @@ fn validate_with_secrets(
             evidence,
         });
     }
-    validate_source_structure(&request.files, &mut diagnostics);
+    validate_source_structure(&request.files, request.dialect, &mut diagnostics);
     if let Some(selected) = flows.flows.iter().find(|flow| {
         flow.kind == FlowKind::Test
             && canonical_header(&flow.header) == canonical_header(&request.selected_flow)
@@ -586,7 +586,11 @@ fn source_context(
     (section, row, evidence)
 }
 
-fn validate_source_structure(files: &[BundleFile], diagnostics: &mut Vec<BundleDiagnostic>) {
+fn validate_source_structure(
+    files: &[BundleFile],
+    dialect: BundleDialect,
+    diagnostics: &mut Vec<BundleDiagnostic>,
+) {
     for file in files {
         let mut headers = HashSet::new();
         let mut section = None;
@@ -643,7 +647,8 @@ fn validate_source_structure(files: &[BundleFile], diagnostics: &mut Vec<BundleD
                         .field("row", None),
                     );
                 }
-                if value.starts_with('"')
+                if dialect == BundleDialect::CheckerLegacy
+                    && value.starts_with('"')
                     && value.ends_with('"')
                     && value.len() > 1
                     && value[1..value.len() - 1].contains('"')
