@@ -359,9 +359,12 @@ pub fn compose(mut request: ComposeBundleRequest, engine: &Engine) -> Result<Val
                     "WIFI_DRAFT"
                 }
             );
-            let Some((device, function, parameters, criteria, definitions)) =
-                encode_procedure(test, &section)
-            else {
+            let Some((device, function, parameters, criteria, definitions)) = encode_procedure(
+                engine,
+                request.comparison.bundle.device_scope.as_deref(),
+                test,
+                &section,
+            ) else {
                 blockers.push(format!("{}: only fully specified 6 GHz Wi-Fi TX/RX/calibration, Bluetooth TX/RX and explicit setup/save/cleanup encodings are supported; missing/unaudited dimensions remain incomplete.", requirement.id));
                 continue;
             };
@@ -842,14 +845,16 @@ fn encode_tx(test: &TxTest, section: &str) -> Option<(String, String, String)> {
         }
         _ => return None,
     };
-    let count = test.packet_count?;
-    if count == 0 {
+    if test.packet_count == Some(0) {
         return None;
     }
-    let parameters = format!(
-        "BAND=6G&ANT={antennas}&STANDARD={standard}&FREQ={}&BW={}&DATA_RATE={rate}&TX_TARGET_POWER=*V:{section}-TARGET#&FRAME_COUNT={count}",
+    let mut parameters = format!(
+        "BAND=6G&ANT={antennas}&STANDARD={standard}&FREQ={}&BW={}&DATA_RATE={rate}&TX_TARGET_POWER=*V:{section}-TARGET#",
         frequency.value, bandwidth.value
     );
+    if let Some(count) = test.packet_count {
+        parameters.push_str(&format!("&FRAME_COUNT={count}"));
+    }
     let criteria = format!("POWER=*V:{section}-POWER#&EVM=*V:{section}-EVM#");
     let definitions = format!(
         "[{section}]\nTARGET={}dBm\nPOWER={}~{}dB\nEVM=<{}dB\n",
@@ -859,6 +864,8 @@ fn encode_tx(test: &TxTest, section: &str) -> Option<(String, String, String)> {
 }
 
 fn encode_procedure(
+    engine: &Engine,
+    scope: Option<&str>,
     test: &TxTest,
     section: &str,
 ) -> Option<(String, String, String, String, String)> {
@@ -898,7 +905,13 @@ fn encode_procedure(
         return encode_bluetooth(test, section);
     }
     if test.purpose.as_deref() == Some("tx") {
-        let (parameters, criteria, definitions) = encode_tx(test, section)?;
+        let (mut parameters, criteria, definitions) = encode_tx(test, section)?;
+        let schema = engine
+            .get_function("DLLWIFI_TEST", "TX_MULTI_VERIFICATION", scope)
+            .ok()?;
+        if !schema.parameters.iter().any(|field| field.name == "BAND") {
+            parameters = parameters.strip_prefix("BAND=6G&")?.to_string();
+        }
         return Some((
             "DLLWIFI_TEST".into(),
             "TX_MULTI_VERIFICATION".into(),

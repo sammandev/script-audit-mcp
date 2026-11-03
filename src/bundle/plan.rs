@@ -420,13 +420,20 @@ pub(super) fn compare_with_secrets(
     let (conflicts, decisions) = resolve_conflicts(&request.plan, &mut blockers);
     let mut mandatory = CoverageCount::default();
     let mut sampling = CoverageCount::default();
+    let band_context = wifi_band_context(&validation);
     let measurements: Vec<_> = validation
         .execution
         .iter()
         .filter(|row| {
             row.reachability != "unreachable" && !row.device.eq_ignore_ascii_case("MACRO")
         })
-        .map(Measurement::new)
+        .map(|row| {
+            let mut measurement = Measurement::new(row);
+            if measurement.band.is_none() {
+                measurement.band = band_context.get(row.id.as_str()).copied();
+            }
+            measurement
+        })
         .collect();
     let mut used = HashSet::new();
     let mut witnesses = BTreeMap::new();
@@ -846,6 +853,114 @@ fn check_dependencies(
     }
 }
 
+fn wifi_band_context(validation: &BundleReport) -> HashMap<&str, &str> {
+    let mut context = HashMap::new();
+    let Some(entry) = validation.execution.first() else {
+        return context;
+    };
+    let rows: HashMap<_, _> = validation
+        .execution
+        .iter()
+        .map(|row| (row.id.as_str(), row))
+        .collect();
+    let mut graph: HashMap<&str, Vec<_>> = HashMap::new();
+    for edge in &validation.execution_edges {
+        graph.entry(&edge.source).or_default().push(edge);
+    }
+    let invalid: HashSet<_> = validation
+        .diagnostics
+        .iter()
+        .filter(|issue| matches!(issue.severity, "error" | "unsupported"))
+        .filter_map(|issue| issue.file.as_deref().zip(issue.line))
+        .collect();
+    let selectors: Vec<_> = validation
+        .execution
+        .iter()
+        .filter(|row| {
+            row.reachability != "unreachable"
+                && row
+                    .device
+                    .split('#')
+                    .next()
+                    .is_some_and(|device| device.eq_ignore_ascii_case("DLLWIFI_TEST"))
+                && ["DUT_INITIALIZE", "DUT_INSERT", "DUT_REMOVE"]
+                    .iter()
+                    .any(|function| row.function.eq_ignore_ascii_case(function))
+        })
+        .collect();
+    let mut budget = 262_144_usize;
+    for band in ["2G", "5G", "6G"] {
+        let mut required = HashSet::new();
+        for row in &selectors {
+            if budget == 0 {
+                return context;
+            }
+            budget -= 1;
+            if row.function.eq_ignore_ascii_case("DUT_INITIALIZE")
+                && row.reachability == "reachable"
+                && !row.redacted
+                && row.references == "resolved"
+                && matches!(row.criteria.as_str(), "NULL" | "DYNAMIC_SHELL_SCRIPT=NULL")
+                && row
+                    .parameters
+                    .split('&')
+                    .any(|assignment| assignment.strip_prefix("BAND=") == Some(band))
+                && !invalid.contains(&(row.file.as_str(), row.line))
+            {
+                required.insert(row.id.as_str());
+            }
+        }
+        if required.is_empty() {
+            continue;
+        }
+        for row in &validation.execution {
+            if budget == 0 {
+                return context;
+            }
+            budget -= 1;
+            if row.reachability != "reachable"
+                || row.redacted
+                || row.references != "resolved"
+                || !row
+                    .device
+                    .split('#')
+                    .next()
+                    .is_some_and(|device| device.eq_ignore_ascii_case("DLLWIFI_TEST"))
+                || !matches!(
+                    row.function.as_str(),
+                    "TX_MULTI_VERIFICATION" | "RX_VERIFY_PER" | "BRCM_RSSI_CALIBRATION"
+                )
+            {
+                continue;
+            }
+            let consumers = HashSet::from([row.id.as_str()]);
+            if success_order(&required, &consumers, entry, &graph, &rows, &mut budget).0
+                != "matched"
+            {
+                continue;
+            }
+            let mut stable = true;
+            for selector in &selectors {
+                if budget == 0 {
+                    return context;
+                }
+                budget -= 1;
+                if !required.contains(selector.id.as_str())
+                    && success_order(&required, &consumers, selector, &graph, &rows, &mut budget).0
+                        != "matched"
+                {
+                    stable = false;
+                    break;
+                }
+            }
+            if stable {
+                context.insert(row.id.as_str(), band);
+            }
+        }
+    }
+    context
+}
+
 fn success_order(
     required: &HashSet<&str>,
     consumers: &HashSet<&str>,
@@ -979,6 +1094,7 @@ impl<'a> Candidates<'a> {
 
 struct Measurement<'a> {
     row: &'a ExecutionRow,
+    band: Option<&'a str>,
     parameters: BTreeMap<&'a str, &'a str>,
     criteria: BTreeMap<&'a str, &'a str>,
 }
@@ -990,9 +1106,11 @@ impl<'a> Measurement<'a> {
                 .filter_map(|assignment| assignment.split_once('='))
                 .collect()
         };
+        let parameters: BTreeMap<_, _> = assignments(&row.parameters);
         Self {
             row,
-            parameters: assignments(&row.parameters),
+            band: parameters.get("BAND").copied(),
+            parameters,
             criteria: assignments(&row.criteria),
         }
     }
@@ -1170,11 +1288,7 @@ impl<'a> Measurement<'a> {
                 Some(if bluetooth { "bluetooth" } else { "wifi" }),
             ),
             ("purpose", test.purpose.as_deref(), self.purpose()),
-            (
-                "band",
-                test.band.as_deref(),
-                self.parameters.get("BAND").copied(),
-            ),
+            ("band", test.band.as_deref(), self.band),
             (
                 "standard",
                 test.standard.as_deref(),

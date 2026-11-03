@@ -240,14 +240,33 @@ or change unrelated definitions.
 | Scoped catalog entry | Required review/correction |
 | --- | --- |
 | `WIFI_TEST / TX_TARGET_POWER` | The live definition uses `int`, but its stored TX example contains `15.5dBm`. If fractional station power is confirmed, change only the definition type to `double`; retain `SINGLE`, `dBm`, `<value>dBm`, and the existing approved numeric range. Otherwise correct the requirement/example instead of relaxing validation. |
-| `WIFI_TEST / BAND` | The tested TX profile has no linked `BAND` field. Confirm that the station's Function accepts this emitted key before adding a scoped string/SINGLE definition with `<band>` and reviewed band identifiers. Link it to Source `DLL`, Function `TX_MULTI_VERIFICATION`, Device scope `WIFI_TEST`; requiredness must follow the reviewed Function contract. |
-| `WIFI_TEST / FRAME_COUNT` | The tested TX profile has no linked packet-count field. Confirm the emitted key and limits before adding a scoped int/SINGLE definition with `<count>` and reviewed constraints, then its matching TX Function link. Do not make optional packet counts mandatory for existing examples. |
+| `WIFI_TEST / PROJECT` | `DUT_INITIALIZE` already links this required string/SINGLE definition, but its pattern is empty. Review `<project>` against the attached `PROJECT=HH5K` initializers and correct only the pattern. Do not insert a project default. |
+| `WIFI_TEST / MASK` and `CSV_TAG` | The attached TX criteria use `MASK=0` and `CSV_TAG=_FIXTURE`; their live patterns are empty. Review scalar patterns such as `<mask>` and `<tag>`, retaining the respective int/string types, SINGLE cardinality, and approved constraints. Unused optional criteria need no fabricated metadata. |
+
+The attached Program 2 macros and live `DUT_INITIALIZE` schema show that `BAND`
+belongs to initialization or macro arguments, not the TX measurement row.
+Do not add a TX `BAND` link merely to satisfy the earlier synthetic fixture.
+The updated comparator uses explicit, validated successful initialization and
+rejects bypass/reselection/reset paths; it never derives band from MHz values.
+Place the insertion marker after the reviewed initialization flow item when
+authoring a reference-shaped TX draft.
+
+`FRAME_COUNT` is present on reference RX rows but absent from the Wi-Fi TX macro.
+Do not copy RX links into TX or invent a TX count. Omit TX packet count when the
+controlling requirement does not specify one. If it does specify one, missing
+audited TX encoding remains a blocker rather than dropping the requirement.
+The previous advice to add TX `BAND`/`FRAME_COUNT` links is superseded by this
+reference-backed distinction.
 
 The existing `ANT` cardinality is already `MULTIPLE`; its
 `<ant1>,<ant2>,...` / Unicode-ellipsis spelling is handled by the parser fix.
 The existing `DATA_RATE` int definition with newline-separated `MCS<index>`,
 `OFDM<index>`, and `CCK<index>` is also supported without replacing its values.
 Do not broaden integer validation globally to accept fractional numbers.
+The attached Program 2 `TEST_SPEC.ini` contains both `15.5dBm` and `14.5dBm`,
+corroborating the TX target-type inconsistency. Reference files remain unchanged.
+Bare reference thresholds such as `EVM=-35dB` still do not prove a strict `<`
+requirement; obtain controlling-source review instead of silently rewriting them.
 Apply the same review to RX or Bluetooth links only if a live failure identifies
 that exact Function/scope; do not copy TX metadata across all Functions.
 

@@ -55,7 +55,7 @@ pub(crate) fn bundle_profile(function: &Function) -> Option<Encoding> {
             && ((function.interface == "WIFI_TEST"
                 && matches!(
                     function.name.as_str(),
-                    "RX_VERIFY_PER" | "BRCM_RSSI_CALIBRATION"
+                    "RX_VERIFY_PER" | "BRCM_RSSI_CALIBRATION" | "DUT_INITIALIZE"
                 ))
                 || (function.interface == "IOT"
                     && matches!(
@@ -145,17 +145,39 @@ fn support_issues_with_bundle_keys(schema: &FunctionSchema, bundle: bool) -> Vec
         }
         for field in fields {
             let key = format!("{prefix}.{}", field.name);
-            let bundle_key = bundle
+            let initializer_key = bundle
+                && schema.function.interface == "WIFI_TEST"
+                && schema.function.name == "DUT_INITIALIZE"
                 && if prefix == "criteria" {
-                    matches!(field.name.as_str(), "EVM" | "PER" | "RSSI")
-                        || (schema.function.interface == "IOT" && field.name == "FREQ_ERROR_KHZ")
+                    field.name == "DYNAMIC_SHELL_SCRIPT"
                 } else {
                     matches!(
                         field.name.as_str(),
-                        "BAND" | "DATA_RATE" | "FRAME_COUNT" | "RX_TARGET_POWER"
-                    ) || (schema.function.interface == "IOT"
-                        && matches!(field.name.as_str(), "TECH" | "DUT_NAME" | "DUT_CASE"))
+                        "PROJECT" | "WL_INTERFACE" | "TEST_CASE"
+                    )
                 };
+            let tx_criterion_key = bundle
+                && prefix == "criteria"
+                && schema.function.interface == "WIFI_TEST"
+                && schema.function.name == "TX_MULTI_VERIFICATION"
+                && matches!(
+                    field.name.as_str(),
+                    "MASK" | "FREQ_ERROR" | "LO_LEAKAGE" | "CSV_TAG"
+                );
+            let bundle_key = initializer_key
+                || tx_criterion_key
+                || bundle
+                    && if prefix == "criteria" {
+                        matches!(field.name.as_str(), "EVM" | "PER" | "RSSI")
+                            || (schema.function.interface == "IOT"
+                                && field.name == "FREQ_ERROR_KHZ")
+                    } else {
+                        matches!(
+                            field.name.as_str(),
+                            "BAND" | "DATA_RATE" | "FRAME_COUNT" | "RX_TARGET_POWER"
+                        ) || (schema.function.interface == "IOT"
+                            && matches!(field.name.as_str(), "TECH" | "DUT_NAME" | "DUT_CASE"))
+                    };
             if encoding == Encoding::Named
                 && !known_key(&field.name, prefix == "criteria")
                 && !bundle_key

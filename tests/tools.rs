@@ -5934,6 +5934,219 @@ async fn bundle_catalog_requiredness_constraints_and_unknown_criteria_are_explic
 }
 
 #[cfg(feature = "mcp")]
+fn reference_wifi_initialization_snapshot() -> Snapshot {
+    let mut snapshot = tx_plan_snapshot();
+    snapshot
+        .parameter_links
+        .retain(|link| !matches!(link.name.as_str(), "BAND" | "FRAME_COUNT"));
+    snapshot.functions.push(Function {
+        source: "DLL".into(),
+        interface: "WIFI_TEST".into(),
+        name: "DUT_INITIALIZE".into(),
+        convention: Some(2),
+        ..Function::default()
+    });
+    for (name, pattern) in [
+        ("BAND", "<band>"),
+        ("PROJECT", "<project>"),
+        ("WL_INTERFACE", "<interface>"),
+    ] {
+        if let Some(definition) = snapshot
+            .parameter_definitions
+            .iter_mut()
+            .find(|definition| definition.name == name)
+        {
+            definition.value_pattern = pattern.into();
+        } else {
+            snapshot.parameter_definitions.push(Definition {
+                name: name.into(),
+                device_name: "WIFI_TEST".into(),
+                kind: "string".into(),
+                cardinality: "SINGLE".into(),
+                value_pattern: pattern.into(),
+                ..Definition::default()
+            });
+        }
+        snapshot.parameter_links.push(Link {
+            name: name.into(),
+            function_source: "DLL".into(),
+            function_name: "DUT_INITIALIZE".into(),
+            device_name: "WIFI_TEST".into(),
+            required: true,
+            position: None,
+        });
+    }
+    snapshot
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn reference_wifi_tx_criteria_keys_use_scoped_catalog_constraints() -> Result<()> {
+    let mut snapshot = tx_plan_snapshot();
+    for (name, kind, unit, pattern) in [
+        ("MASK", "int", "", "<mask>"),
+        ("FREQ_ERROR", "int", "PPM", "<limit>PPM"),
+        (
+            "LO_LEAKAGE",
+            "string",
+            "PPM",
+            "<lower_limit>~<upper_limit>PPM",
+        ),
+        ("CSV_TAG", "string", "", "<tag>"),
+    ] {
+        snapshot.criteria_definitions.push(Definition {
+            name: name.into(),
+            device_name: "WIFI_TEST".into(),
+            kind: kind.into(),
+            unit: unit.into(),
+            cardinality: "SINGLE".into(),
+            value_pattern: pattern.into(),
+            ..Definition::default()
+        });
+        snapshot.criteria_links.push(Link {
+            name: name.into(),
+            device_name: "WIFI_TEST".into(),
+            function_source: "DLL".into(),
+            function_name: "TX_MULTI_VERIFICATION".into(),
+            required: false,
+            position: None,
+        });
+    }
+    let mut arguments = tx_plan_arguments()["bundle"].clone();
+    let text = arguments["files"][0]["text"]
+        .as_str()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("fixture text is missing".into()))?
+        .replace(
+            "EVM=<-35dB",
+            "EVM=<-35dB&MASK=0&FREQ_ERROR=20PPM&LO_LEAKAGE=-90~-20PPM&CSV_TAG=_FIXTURE",
+        );
+    arguments["files"][0]["text"] = text.clone().into();
+    let report = bundle_report_with_snapshot(arguments.clone(), snapshot.clone()).await?;
+    assert_eq!(report["status"], "valid", "{report}");
+    arguments["files"][0]["text"] = text.replace("MASK=0", "MASK=bad").into();
+    let report = bundle_report_with_snapshot(arguments, snapshot).await?;
+    assert_eq!(report["status"], "invalid", "{report}");
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn reference_wifi_band_requires_successful_validated_initialization() -> Result<()> {
+    let snapshot = reference_wifi_initialization_snapshot();
+    let measurement = "TX=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=1,2,4,8&STANDARD=11AG&FREQ=6115&BW=20&DATA_RATE=OFDM6&TX_TARGET_POWER=15.5dBm|POWER=-1~2dB&EVM=<-35dB|1|QUIT|FAIL\"\n";
+    for (setup, matched) in [
+        (
+            "INIT=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=6G&WL_INTERFACE=wl2|NULL|10000|NEXT|FAIL\"\n",
+            true,
+        ),
+        (
+            "INIT=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=6G&WL_INTERFACE=wl2|NULL|10000|NEXT|NEXT\"\n",
+            false,
+        ),
+        (
+            "INIT=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=5G&WL_INTERFACE=wl0|NULL|10000|NEXT|FAIL\"\n",
+            false,
+        ),
+        (
+            "INIT=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=6G&WL_INTERFACE=wl2|NULL|10000|NEXT|FAIL\"\nRESELECT=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=5G&WL_INTERFACE=wl0|NULL|10000|NEXT|FAIL\"\n",
+            false,
+        ),
+        (
+            "INIT=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=6G&WL_INTERFACE=wl2|NULL|10000|NEXT|FAIL\"\nREMOVE=\"DLLWIFI_TEST|DUT_REMOVE|NULL|NULL|5000|NEXT|FAIL\"\n",
+            false,
+        ),
+    ] {
+        let mut arguments = tx_plan_arguments();
+        arguments["plan"]["requirements"][0]["test"]["packet_count"] = serde_json::Value::Null;
+        arguments["bundle"]["files"][0]["text"] =
+            format!("[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n{setup}{measurement}").into();
+        let request = serde_json::from_value(arguments)
+            .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+        let result = script_audit_mcp::mcp::McpServer::new(std::sync::Arc::new(
+            CompositionCatalog(snapshot.clone()),
+        ))
+        .compare_plan_to_bundle(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+        let report = result.structured_content.ok_or_else(|| {
+            script_audit_mcp::Error::Knowledge("comparison report is missing".into())
+        })?;
+        assert_eq!(
+            report["coverage"][0]["status"] == "matched",
+            matched,
+            "{report}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn reference_tx_draft_does_not_invent_unlinked_band_or_unspecified_frame_count() -> Result<()>
+{
+    let snapshot = reference_wifi_initialization_snapshot();
+    let mut arguments = reviewed_composition_arguments().await?;
+    arguments["comparison"]["plan"]["requirements"][0]["test"]["packet_count"] =
+        serde_json::Value::Null;
+    arguments["review"] = serde_json::Value::Null;
+    arguments["template_pack"]["approval"] = serde_json::Value::Null;
+    let initial = compose_report_with_snapshot(arguments.clone(), snapshot.clone()).await?;
+    for role in ["plan", "base", "settings"] {
+        arguments["review"][role] = serde_json::json!({
+            "kind":"synthetic_fixture", "approver":"reference regression",
+            "evidence":"Synthetic test only; no operational approval",
+            "subject_identity": initial["input_identities"][role]
+        });
+    }
+    arguments["template_pack"]["approval"] = serde_json::json!({
+        "kind":"synthetic_fixture", "approver":"reference regression",
+        "evidence":"Synthetic test only; no operational approval",
+        "subject_identity":initial["input_identities"]["template_pack"]
+    });
+    let draft = compose_report_with_snapshot(arguments.clone(), snapshot.clone()).await?;
+    let main = draft["draft_files"][0]["text"]
+        .as_str()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("draft text is missing".into()))?;
+    let measurement = main
+        .lines()
+        .find(|line| line.starts_with("MEASURE="))
+        .ok_or_else(|| {
+            script_audit_mcp::Error::Knowledge(format!(
+                "reference-shaped TX draft was not generated: {draft}"
+            ))
+        })?;
+    assert!(!measurement.contains("BAND="), "{measurement}");
+    assert!(!measurement.contains("FRAME_COUNT="), "{measurement}");
+    assert!(
+        measurement.contains("ANT=1,2,4,8&STANDARD=11AG"),
+        "{measurement}"
+    );
+    assert_eq!(draft["ready_for_review"], false);
+    assert_eq!(
+        draft["comparison"]["coverage"][0]["status"], "unknown",
+        "{draft}"
+    );
+
+    let mut initialized = arguments;
+    let base = initialized["comparison"]["bundle"]["files"][0]["text"]
+        .as_str()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("base text is missing".into()))?;
+    initialized["comparison"]["bundle"]["files"][0]["text"] = format!("{}\r\n[INIT]\r\nSETUP=\"DLLWIFI_TEST|DUT_INITIALIZE|PROJECT=HH5K&BAND=6G&WL_INTERFACE=wl2|NULL|10000|NEXT|FAIL\"\r\n", base.replace("[TEST FLOW:Normal]\r\n", "[TEST FLOW:Normal]\r\nINIT=\"INIT\"\r\n")).into();
+    let probe = compose_report_with_snapshot(initialized.clone(), snapshot.clone()).await?;
+    for role in ["base", "settings"] {
+        initialized["review"][role]["subject_identity"] = probe["input_identities"][role].clone();
+    }
+    let draft = compose_report_with_snapshot(initialized, snapshot).await?;
+    assert_eq!(draft["comparison"]["mandatory"]["matched"], 1, "{draft}");
+    assert_eq!(
+        draft["comparison"]["validation"]["status"], "valid",
+        "{draft}"
+    );
+    assert_eq!(draft["ready_for_review"], false);
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
 #[tokio::test]
 async fn live_catalog_wifi_patterns_preserve_explicit_catalog_requirements() -> Result<()> {
     let mut snapshot = tx_plan_snapshot();

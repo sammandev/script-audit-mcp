@@ -300,6 +300,14 @@ strict/inclusive semantics and stays unknown. The named grammar rejects another
 operators are `lt`, `le`, `eq`, `ge`, and `gt`; different operators do not match.
 An optional TX packet count compares `FRAME_COUNT` exactly.
 
+The attached HH5K station TX macros do not pass `BAND` or `FRAME_COUNT` directly
+to `TX_MULTI_VERIFICATION`. When a measurement lacks `BAND`, comparison can use
+a catalog-validated `DUT_INITIALIZE` with an explicit band only if every supported
+path to that measurement crosses successful initialization. Intervening DUT
+insertion, removal, or a different/uncertain initialization must reestablish the
+same band. Missing or uncertain context remains unknown; frequency never implies
+band. Dynamic shell-script initialization remains unchecked.
+
 RX uses `purpose: "rx"` with the same operating dimensions and an `input_level`
 in dBm instead of `power_target`. It requires `packet_count` and a `per`
 comparison in percent. Supply `rssi_tolerance` where applicable. For example,
@@ -632,7 +640,11 @@ The timeout reference names the caller's approved timing setting; the section/ke
 shown above are illustrative. The supplied template fixes the encoding and
 uppercase control paths. No escaping or arbitrary template evaluation occurs.
 Generation requires explicit supported test dimensions, individual antenna masks,
-packet count, dBm target, dB power tolerance and strict EVM comparison. Missing
+dBm target, dB power tolerance and strict EVM comparison. TX packet count is
+optional; if supplied, its encoding still requires the reviewed catalog support.
+TX generation emits a direct `BAND` key only when linked in the selected scoped
+catalog. Otherwise the approved base must establish band through successful
+initialization before the insertion marker. Missing
 values never come from catalog defaults. Current controlling-source provenance
 and requirement-specific conflict decisions are checked before expansion.
 
