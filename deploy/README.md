@@ -333,6 +333,95 @@ with this name already exists, inspect it before replacing it.
 
 ## Updates And Rollback
 
+### One-command operator tasks
+
+For the existing installation, transfer the complete updated source tree through
+the approved manual process, then run these Bash scripts on Ubuntu as the
+ordinary operator account. Do not run `sudo bash`: privileged steps invoke sudo
+themselves, while the build remains unprivileged. Paths are resolved relative to
+the scripts, so the tasks work from any working directory.
+
+```sh
+cd /data/ptb/script-audit-mcp
+
+# Build only; do not change the running service.
+bash deploy/build.sh
+
+# Build, back up, atomically replace the binary, restart, and check MCP.
+bash deploy/update.sh
+
+# Inspect service state, binary checksum, listeners, and Nginx syntax.
+bash deploy/status.sh
+
+# Show the latest 100 service log entries since the most recent process start.
+bash deploy/debug.sh
+# Or explicitly include an earlier period:
+bash deploy/debug.sh '30 minutes ago'
+
+# Initialize, discover all eight tools, check proxy rejections, close the session.
+bash deploy/mcp-smoke.sh
+
+# Optional operator-approved tool call; use arguments from its current schema.
+bash deploy/mcp-smoke.sh --tool list_functions --arguments '{}'
+
+# Roll back only the binary; use the EXACT path printed by update.sh.
+bash deploy/rollback.sh /opt/script-audit-mcp/backups/REPLACE_WITH_EXACT_BACKUP_DIRECTORY
+```
+
+Rollback requires typing `ROLLBACK`, backs up the current installation first,
+and restarts MCP. It never selects a backup automatically. Older dated backups
+from the manual procedure are also accepted. Review the selected backup's
+release provenance before restoring it.
+
+Requirements: Bash, the approved Rust toolchain, sudo, systemd, Nginx, curl,
+Python 3.10 or newer, and standard Ubuntu utilities (`flock`, `ss`, `awk`,
+`realpath`, and coreutils). Python uses only its standard library; no pip
+installation is needed. Scripts never install dependencies, transfer source,
+access the database directly, or migrate it. `mcp-smoke.sh --help` describes
+the optional URL and tool arguments; the URL must be this deployment's approved
+Nginx endpoint, not the private listener, because the proxy rejection checks
+are mandatory. Smoke checks can also be run on an intended LAN/VPN client.
+
+Updates and rollbacks are deliberately **binary-only**. They refuse unexpected
+unit paths, service accounts, environment-file paths, or ExecStart settings.
+They preserve the installed unit, environment, Nginx site, and database.
+Backups are root-only, outside the repository, and include the binary, unit,
+environment, Nginx site, and unit drop-ins if present. They are not marked as
+verified releases automatically. Configuration changes or first installation
+still require the manual sections of this runbook and host approval.
+
+Concurrent updates/rollbacks from the same source directory are blocked using
+`.deploy.lock`; all operators must use the same source directory. Do not build
+or overwrite uploaded source in that directory while an update is running.
+Build/preflight failures leave the installed binary untouched. Failures after
+replacement return nonzero and report the backup path; no automatic rollback
+is attempted. Read the failure output and current logs, then explicitly select
+the recovery backup if needed.
+
+Post-restart verification retries up to ten times, two seconds apart. Each HTTP
+request has a 20-second timeout. It verifies the exact listener addresses,
+JSON-RPC initialization, negotiated protocol version, initialization notification,
+all eight tool names, and untrusted Host/Origin rejection. Smoke sessions are
+terminated even after a check failure. Optional tool calls print their results
+and fail on MCP tool errors, but do not certify validation semantics, draft
+approval, or hardware behavior. Review tool results locally before sharing;
+debug logs may contain connection details and must be redacted.
+
+After passing automation, reconnect clients, check known catalog content,
+retest the changed behavior, confirm the existing web application still works,
+and verify LAN/VPN-only exposure. Passing local protocol checks does not prove
+firewall enforcement or production catalog correctness.
+
+Local tests use mocks and never contact the approved host or a database:
+
+```sh
+python3 -B -m unittest discover -s deploy/tests -p 'test_*.py'
+bash deploy/tests/operations.test.sh
+bash deploy/tests/workflow.test.sh
+```
+
+### Manual update and configuration recovery
+
 Before each update, retain a root-only, dated backup outside the repository of
 the current binary, installed unit, environment file, and Nginx site. Retain
 existing permissions. Record which backup belongs to the last verified release.
