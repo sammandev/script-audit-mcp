@@ -54,7 +54,9 @@ Follow [the Ubuntu deployment runbook](deploy/README.md) for prerequisites,
 protected environment configuration, installation, session-aware smoke checks,
 VS Code/OpenCode/Claude Code setup, and rollback. This deployment neither
 installs a database engine nor changes the catalog schema. Deployment remains
-manual and user-run; the agent does not access Ubuntu or any database.
+manual and user-run; local Windows development and test databases are permitted
+under [ADR 0002](docs/adr/0002-off-machine-database-verification.md), but the
+agent does not access Ubuntu or the production/deployment database.
 
 ## Tools
 
@@ -963,7 +965,7 @@ credentials, run database operations/tests, or approve production artifacts.
 
 Rust 1.88 or newer is required. Default features include PostgreSQL and MCP, with no SQLite engine. Native TLS uses OpenSSL on Ubuntu; the build host needs its development headers, `pkg-config`, and a C toolchain. The historical SQLite adapter remains behind `legacy-sqlite` and is not built by default.
 
-On a user-approved test machine, outside the restricted Windows host, set `TEST_DATABASE_URL` and its password source before running:
+On the Windows development host, run the database-backed fixture gates against a local test PostgreSQL instance. Set `TEST_DATABASE_URL` and its password source before running:
 
 ```sh
 cargo fmt --all -- --check
@@ -974,7 +976,7 @@ cargo build --release
 
 The PostgreSQL fixture creates and cleans up a uniquely named schema. It verifies that actual catalog reads use read-only repeatable-read transactions and correctly decode BIGINT fields and NULLs. A missing test URL is an error. Database-backed fixture execution and stdio startup have not been run locally. Handshake, discovery, and dispatch of all eight tools are tested over an in-memory transport.
 
-On this Windows host, run only database-free tests, with all database features disabled:
+Database-free checks can also run on Windows with database features disabled:
 
 ```powershell
 cargo fmt --all -- --check
@@ -986,10 +988,14 @@ cargo clippy --no-default-features --features mcp --all-targets -- -D warnings
 These commands pass on the selected MSVC Windows toolchain. An older GNU setup
 needed a command-only `getrandom` backend override for missing import-library
 tools; do not persist or apply that override to MSVC/Linux. PostgreSQL client-only
-`cargo check` and Clippy can use `--no-default-features --features database,mcp`
-without running a test or building SQLite. Never enable `legacy-sqlite` here.
-No database test or database connection is permitted locally.
+`cargo check` and Clippy can use `--no-default-features --features database,mcp`.
+Use the PostgreSQL fixture tests above for database-backed verification; keep
+`legacy-sqlite` disabled unless a task specifically tests that adapter.
 
-Deployment and the SQLite transfer are manual. The agent does not access Ubuntu or connect to either database. Follow the web repository's `docs/postgresql-migration.md`, verify the shared PostgreSQL catalog, then deploy this binary and update the client's environment. Preserve the old binary and SQLite data for rollback before application writes resume.
+Deployment and the SQLite transfer are manual. The agent does not access Ubuntu
+or connect to the production/deployment database. Follow the web repository's
+`docs/postgresql-migration.md`, verify the shared PostgreSQL catalog, then deploy
+this binary and update the client's environment. Preserve the old binary and
+SQLite data for rollback before application writes resume.
 
 See [the script contract](docs/adr/0001-script-contract-and-validation.md), [the verification boundary](docs/adr/0002-off-machine-database-verification.md), [the PostgreSQL reader decision](docs/adr/0003-postgresql-catalog.md), and [the HTTP transport decision](docs/adr/0004-http-transport.md).

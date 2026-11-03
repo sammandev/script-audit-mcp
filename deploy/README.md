@@ -219,6 +219,62 @@ unreachable, and the network firewall must prevent public-internet access to
 39064. Check the existing web application still works. Restarts discard
 in-memory MCP sessions; clients must initialize again after HTTP 404.
 
+## Live Catalog Compatibility Remediation
+
+The 2026-11-03 live checks reached all eight tools. Wi-Fi TX validation and
+composition exposed catalog/parser incompatibilities, not an HTTP outage.
+The local parser corrections support newline-separated template alternatives,
+uniform repeated templates with a comma before an ellipsis, and bounded ASCII
+character classes. Bundle validation and composition check unsupported optional
+metadata only when that field is used; required fields and dynamic keys remain
+checked. Full-schema discovery can still report unsupported optional fields.
+
+Deploying the binary alone does not repair missing or contradictory catalog
+knowledge. Review the following through the existing catalog application's
+definition and link editors. Database changes are operator-owned on the
+approved host, never performed by the agent or on the Windows workstation.
+Export the affected definitions and links before editing; retain their original
+values for rollback. Do not rename fields, overwrite examples, insert defaults,
+or change unrelated definitions.
+
+| Scoped catalog entry | Required review/correction |
+| --- | --- |
+| `WIFI_TEST / TX_TARGET_POWER` | The live definition uses `int`, but its stored TX example contains `15.5dBm`. If fractional station power is confirmed, change only the definition type to `double`; retain `SINGLE`, `dBm`, `<value>dBm`, and the existing approved numeric range. Otherwise correct the requirement/example instead of relaxing validation. |
+| `WIFI_TEST / BAND` | The tested TX profile has no linked `BAND` field. Confirm that the station's Function accepts this emitted key before adding a scoped string/SINGLE definition with `<band>` and reviewed band identifiers. Link it to Source `DLL`, Function `TX_MULTI_VERIFICATION`, Device scope `WIFI_TEST`; requiredness must follow the reviewed Function contract. |
+| `WIFI_TEST / FRAME_COUNT` | The tested TX profile has no linked packet-count field. Confirm the emitted key and limits before adding a scoped int/SINGLE definition with `<count>` and reviewed constraints, then its matching TX Function link. Do not make optional packet counts mandatory for existing examples. |
+
+The existing `ANT` cardinality is already `MULTIPLE`; its
+`<ant1>,<ant2>,...` / Unicode-ellipsis spelling is handled by the parser fix.
+The existing `DATA_RATE` int definition with newline-separated `MCS<index>`,
+`OFDM<index>`, and `CCK<index>` is also supported without replacing its values.
+Do not broaden integer validation globally to accept fractional numbers.
+Apply the same review to RX or Bluetooth links only if a live failure identifies
+that exact Function/scope; do not copy TX metadata across all Functions.
+
+After approved catalog edits, upload the corrected source through the approved
+manual transfer process, rebuild the Linux binary with the production features,
+and follow this runbook's existing update/rollback procedure. Keep the database
+URL, environment file, Nginx configuration, and client endpoint unchanged.
+Restarted HTTP sessions require client reinitialization.
+
+Retest through the live MCP connection after deployment:
+
+1. `get_function` must return the reviewed definitions and matching scoped links;
+  `suggest_criteria` must agree with its criteria and recorded examples.
+2. `validate_ini_bundle` must accept the reviewed Wi-Fi TX values and still reject
+  unknown keys, invalid rates, invalid antenna masks, and out-of-range values.
+3. `compare_plan_to_bundle` must locate reachable matching TX evidence, with
+  missing/unreachable tests and source conflicts still blocking coverage.
+4. `compose_ini_bundle` must generate the supported synthetic draft after all
+  six marked base files, settings, corrected-copy template, and current input
+  approvals are supplied. Check diffs, acceptance links, and revalidation.
+
+Synthetic drafts must remain `artifact_authority: synthetic_only` and
+`ready_for_review: false`. Missing approvals, stale draft claims, unresolved
+runtime references, and unsupported sampling-policy application are intentional
+safety gates, not failures to remove. No tool authenticates human approval,
+exports files, executes station scripts, or certifies hardware behavior.
+
 ## Client Configuration
 
 Use the full `/mcp` URL. Merge entries into existing configuration; do not

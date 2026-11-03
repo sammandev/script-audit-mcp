@@ -1121,7 +1121,7 @@ fn supported(
     let Some(encoding) = grammar::bundle_profile(&schema.function) else {
         return false;
     };
-    let mut issues = grammar::bundle_support_issues(&schema);
+    let mut issues = grammar::bundle_payload_support_issues(&schema, parameters, criteria);
     for (raw, fields, criteria) in [
         (parameters, schema.parameters.as_slice(), false),
         (criteria, schema.criteria.as_slice(), true),

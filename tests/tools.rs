@@ -5935,6 +5935,139 @@ async fn bundle_catalog_requiredness_constraints_and_unknown_criteria_are_explic
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn live_catalog_wifi_patterns_preserve_explicit_catalog_requirements() -> Result<()> {
+    let mut snapshot = tx_plan_snapshot();
+    for definition in &mut snapshot.parameter_definitions {
+        match definition.name.as_str() {
+            "ANT" => {
+                definition.kind = "int".into();
+                definition.cardinality = "MULTIPLE".into();
+                definition.value_pattern = "<ant1>,<ant2>,\u{2026}".into();
+                definition.allowed_values = "{1,2,3,4,7,8,15}".into();
+            }
+            "STANDARD" => {
+                definition.value_pattern = "11<generation>".into();
+                definition.allowed_values = "[A-Z0-9]".into();
+            }
+            "DATA_RATE" => {
+                definition.kind = "int".into();
+                definition.value_pattern = "MCS<index>\nOFDM<index>\nCCK<index>".into();
+                definition.allowed_values = "[0..99]".into();
+            }
+            "TX_TARGET_POWER" => {
+                definition.kind = "double".into();
+                definition.unit = "dBm".into();
+                definition.value_pattern = "<value>dBm".into();
+                definition.allowed_values = "[0..24]".into();
+            }
+            _ => {}
+        }
+    }
+    let arguments = tx_plan_arguments();
+    let report = bundle_report_with_snapshot(arguments["bundle"].clone(), snapshot.clone()).await?;
+    assert_eq!(report["status"], "valid", "{report}");
+    let draft =
+        compose_report_with_snapshot(reviewed_composition_arguments().await?, snapshot.clone())
+            .await?;
+    assert_eq!(draft["comparison"]["mandatory"]["matched"], 1, "{draft}");
+    assert_eq!(draft["diffs"].as_array().map(Vec::len), Some(2), "{draft}");
+
+    for name in ["BAND", "FRAME_COUNT", "TX_TARGET_POWER"] {
+        let mut incomplete = snapshot.clone();
+        if name == "TX_TARGET_POWER" {
+            for definition in &mut incomplete.parameter_definitions {
+                if definition.name == name {
+                    definition.kind = "int".into();
+                }
+            }
+        } else {
+            incomplete.parameter_links.retain(|link| link.name != name);
+        }
+        let report = bundle_report_with_snapshot(arguments["bundle"].clone(), incomplete).await?;
+        assert_eq!(report["status"], "invalid", "{report}");
+        assert!(
+            report["diagnostics"]
+                .as_array()
+                .is_some_and(|issues| issues.iter().any(|issue| {
+                    issue["field"] == format!("params.{name}") && issue["severity"] == "error"
+                })),
+            "{report}"
+        );
+    }
+    for (before, after) in [
+        ("OFDM6", "OFDM100"),
+        ("ANT=1,2,4,8", "ANT=99"),
+        ("11AG", "11ag"),
+    ] {
+        let mut invalid = arguments["bundle"].clone();
+        let text = invalid["files"][0]["text"]
+            .as_str()
+            .ok_or_else(|| script_audit_mcp::Error::Knowledge("fixture text is missing".into()))?
+            .replace(before, after);
+        invalid["files"][0]["text"] = text.into();
+        let report = bundle_report_with_snapshot(invalid, snapshot.clone()).await?;
+        assert_eq!(report["status"], "invalid", "{report}");
+        assert!(
+            report["diagnostics"]
+                .as_array()
+                .is_some_and(|issues| issues.iter().any(|issue| {
+                    issue["code"] == "allowed_values" && issue["severity"] == "error"
+                })),
+            "{report}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn live_catalog_unused_optional_fields_do_not_block_bundle_or_draft() -> Result<()> {
+    let mut snapshot = tx_plan_snapshot();
+    snapshot.criteria_definitions.push(Definition {
+        name: "MASK".into(),
+        device_name: "WIFI_TEST".into(),
+        kind: "int".into(),
+        cardinality: "SINGLE".into(),
+        ..Definition::default()
+    });
+    snapshot.criteria_links.push(Link {
+        name: "MASK".into(),
+        function_source: "DLL".into(),
+        function_name: "TX_MULTI_VERIFICATION".into(),
+        device_name: "WIFI_TEST".into(),
+        required: false,
+        position: None,
+    });
+    let arguments = tx_plan_arguments();
+    let report = bundle_report_with_snapshot(arguments["bundle"].clone(), snapshot.clone()).await?;
+    assert_eq!(report["status"], "valid", "{report}");
+    let draft =
+        compose_report_with_snapshot(reviewed_composition_arguments().await?, snapshot.clone())
+            .await?;
+    assert_eq!(draft["comparison"]["mandatory"]["matched"], 1, "{draft}");
+    assert_eq!(draft["diffs"].as_array().map(Vec::len), Some(2), "{draft}");
+
+    let mut supplied = arguments["bundle"].clone();
+    let text = supplied["files"][0]["text"]
+        .as_str()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("fixture text is missing".into()))?
+        .replace("POWER=-1~2dB", "MASK=1&POWER=-1~2dB");
+    supplied["files"][0]["text"] = text.into();
+    let report = bundle_report_with_snapshot(supplied, snapshot).await?;
+    assert_eq!(report["status"], "incomplete", "{report}");
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| {
+                issue["field"] == "criteria.MASK" && issue["severity"] == "unsupported"
+            })),
+        "{report}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_catalog_orphans_and_unsupported_knowledge_never_pass_or_fill_defaults() -> Result<()>
 {
     let text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|QUIT|FAIL\"\n";

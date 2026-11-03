@@ -43,7 +43,11 @@ pub(super) fn validate(
         }
         match engine.get_function(device, &row.function, scope) {
             Ok(schema) => {
-                issues.extend(grammar::bundle_support_issues(&schema));
+                issues.extend(grammar::bundle_payload_support_issues(
+                    &schema,
+                    &row.parameters,
+                    &row.criteria,
+                ));
                 for (raw, fields, criteria) in [
                     (row.parameters.as_str(), schema.parameters.as_slice(), false),
                     (row.criteria.as_str(), schema.criteria.as_slice(), true),

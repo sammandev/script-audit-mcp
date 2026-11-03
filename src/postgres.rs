@@ -201,7 +201,7 @@ mod tests {
         fn new() -> Result<Self> {
             let dsn = env::var("TEST_DATABASE_URL").map_err(|_| Error::InvalidInput {
                 field: "TEST_DATABASE_URL".into(),
-                message: "PostgreSQL fixture tests require an authorized off-machine test database"
+                message: "PostgreSQL fixture tests require an authorized local test database"
                     .into(),
             })?;
             let mut catalog = PostgresCatalog::new(&dsn)?;

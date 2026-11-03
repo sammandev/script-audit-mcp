@@ -75,6 +75,40 @@ pub(crate) fn bundle_support_issues(schema: &FunctionSchema) -> Vec<Diagnostic> 
     support_issues_with_bundle_keys(schema, true)
 }
 
+pub(crate) fn bundle_payload_support_issues(
+    schema: &FunctionSchema,
+    parameters: &str,
+    criteria: &str,
+) -> Vec<Diagnostic> {
+    let mut issues = bundle_support_issues(schema);
+    if bundle_profile(&schema.function) != Some(Encoding::Named) {
+        return issues;
+    }
+    issues.retain(|issue| {
+        let Some((prefix, name)) = issue.field.split_once('.') else {
+            return true;
+        };
+        let (fields, raw) = match prefix {
+            "params" => (&schema.parameters, parameters),
+            "criteria" => (&schema.criteria, criteria),
+            _ => return true,
+        };
+        fields
+            .iter()
+            .find(|field| field.name == name)
+            .is_none_or(|field| {
+                field.required
+                    || raw.split('&').any(|assignment| {
+                        assignment.split_once('=').map_or_else(
+                            || assignment.contains('*'),
+                            |(key, _)| key == name || key.contains('*'),
+                        )
+                    })
+            })
+    });
+    issues
+}
+
 fn support_issues_with_bundle_keys(schema: &FunctionSchema, bundle: bool) -> Vec<Diagnostic> {
     let mut issues = Vec::new();
     let Some(encoding) = (if bundle {
@@ -589,6 +623,14 @@ fn validate_value(
                 continue;
             }
             match allowed(&definition.allowed_values) {
+                Ok(Allowed::Characters(expression)) if !expression.is_match(token) => {
+                    issues.push(diagnostic(
+                        key,
+                        "allowed_values",
+                        "value contains characters outside the allowed class",
+                        Severity::Error,
+                    ));
+                }
                 Ok(Allowed::Set(values))
                     if !values
                         .iter()
@@ -625,7 +667,21 @@ fn pattern(definition: &Definition) -> std::result::Result<Regex, String> {
     if original.is_empty() {
         return Err("value_pattern is missing".into());
     }
-    let repetition = Regex::new(r"^<[^<>]+>(?:,\s*<[^<>]+>)+(?:\.{3}|\u{2026})$")
+    let alternatives = original
+        .lines()
+        .map(|template| pattern_expression(definition, template.trim()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Regex::new(&format!("\\A(?:{})\\z", alternatives.join("|"))).map_err(|error| error.to_string())
+}
+
+fn pattern_expression(
+    definition: &Definition,
+    original: &str,
+) -> std::result::Result<String, String> {
+    if original.is_empty() {
+        return Err("pattern alternatives must be nonempty".into());
+    }
+    let repetition = Regex::new(r"^<[^<>]+>(?:,\s*<[^<>]+>)+,?\s*(?:\.{3}|\u{2026})$")
         .map_err(|error| error.to_string())?;
     let multi = definition.cardinality == "MULTIPLE" || definition.kind == "list[int]";
     let source = if repetition.is_match(original) {
@@ -639,7 +695,7 @@ fn pattern(definition: &Definition) -> std::result::Result<Regex, String> {
     if source.contains(['[', ']', '{', '}', '\u{2026}']) || source.contains("...") {
         return Err("optional or undocumented repetition syntax is unsupported".into());
     }
-    let mut expression = String::from("\\A");
+    let mut expression = String::new();
     let mut remaining = source;
     let mut count = 0;
     while let Some(start) = remaining.find('<') {
@@ -662,14 +718,14 @@ fn pattern(definition: &Definition) -> std::result::Result<Regex, String> {
         return Err("MULTIPLE requires a scalar or uniform repeated placeholder template".into());
     }
     expression.push_str(&regex::escape(remaining));
-    expression.push_str("\\z");
-    Regex::new(&expression).map_err(|error| error.to_string())
+    Ok(expression)
 }
 
 enum Allowed {
     Any,
     Set(Vec<String>),
     Range(f64, f64),
+    Characters(Regex),
 }
 
 fn allowed(raw: &str) -> std::result::Result<Allowed, String> {
@@ -707,5 +763,148 @@ fn allowed(raw: &str) -> std::result::Result<Allowed, String> {
             return Ok(Allowed::Range(lower, upper));
         }
     }
-    Err("only explicit {sets} and [lower..upper] numeric ranges are supported".into())
+    let character_class = Regex::new(r"^\[(?:[A-Za-z0-9](?:-[A-Za-z0-9])?)+\]$")
+        .map_err(|error| error.to_string())?;
+    if character_class.is_match(raw) {
+        return Regex::new(&format!("\\A{raw}+\\z"))
+            .map(Allowed::Characters)
+            .map_err(|error| error.to_string());
+    }
+    Err("only explicit {sets}, [lower..upper] numeric ranges, and ASCII character classes are supported".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_catalog_syntax_extensions_do_not_hide_unsupported_constraints() {
+        for template in [
+            "MCS<index>\n[OFDM<index>]",
+            "MCS<index>\n\nOFDM<index>",
+            "MCS<index>\nOFDM<",
+        ] {
+            let definition = Definition {
+                cardinality: "SINGLE".into(),
+                value_pattern: template.into(),
+                ..Definition::default()
+            };
+            assert!(pattern(&definition).is_err(), "accepted {template:?}");
+        }
+        for constraint in ["[Z-A]", "[^A-Z]", "[A-Z]*", "[A-Z]|.*", "unreviewed prose"] {
+            assert!(allowed(constraint).is_err(), "accepted {constraint:?}");
+        }
+    }
+
+    #[test]
+    fn live_catalog_rate_patterns_accept_alternatives() -> std::result::Result<(), String> {
+        for separator in ["\n", "\r\n"] {
+            let definition = Definition {
+                name: "DATA_RATE".into(),
+                kind: "string".into(),
+                cardinality: "SINGLE".into(),
+                value_pattern: ["MCS<index>", "OFDM<index>", "CCK<index>"].join(separator),
+                allowed_values: "[0..99]".into(),
+                ..Definition::default()
+            };
+            let expression = pattern(&definition)?;
+            for (raw, expected) in [("MCS0", "0"), ("OFDM6", "6"), ("CCK11", "11")] {
+                let captures = expression
+                    .captures(raw)
+                    .ok_or_else(|| format!("live catalog pattern rejected {raw}"))?;
+                let values: Vec<_> = captures.iter().skip(1).flatten().collect();
+                assert_eq!(values.len(), 1);
+                assert_eq!(values[0].as_str(), expected);
+            }
+            for raw in ["OFDM6\nCCK11", "UNKNOWN6", "OFDM", "prefixOFDM6"] {
+                assert!(!expression.is_match(raw), "accepted {raw:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn live_catalog_repeated_patterns_allow_comma_before_ellipsis()
+    -> std::result::Result<(), String> {
+        for template in [
+            "<ant1>,<ant2>,\u{2026}",
+            "<ant1>,<ant2>,...",
+            "<ant1>,<ant2>...",
+        ] {
+            let definition = Definition {
+                kind: "int".into(),
+                cardinality: "MULTIPLE".into(),
+                value_pattern: template.into(),
+                ..Definition::default()
+            };
+            let expression = pattern(&definition)?;
+            assert!(expression.is_match("1"));
+            let field = Field {
+                name: "ANT".into(),
+                device_name: "WIFI_TEST".into(),
+                position: Some(1),
+                required: true,
+                definition: Some(definition),
+            };
+            let mut issues = vec![];
+            validate_value(
+                &field,
+                &Value::Multiple(vec!["1,2".into()]),
+                Encoding::Named,
+                "params.ANT",
+                &mut issues,
+            );
+            assert!(issues.iter().any(|issue| issue.code == "invalid_value"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn live_catalog_standard_character_constraints_are_checked() {
+        let field = Field {
+            name: "STANDARD".into(),
+            device_name: "WIFI_TEST".into(),
+            position: Some(1),
+            required: true,
+            definition: Some(Definition {
+                kind: "string".into(),
+                cardinality: "SINGLE".into(),
+                value_pattern: "11<generation>".into(),
+                allowed_values: "[A-Z0-9]".into(),
+                ..Definition::default()
+            }),
+        };
+        let schema = FunctionSchema {
+            function: Function {
+                source: "DLL".into(),
+                interface: "WIFI_TEST".into(),
+                name: "TX_MULTI_VERIFICATION".into(),
+                convention: Some(2),
+                ..Function::default()
+            },
+            device_scope: "WIFI_TEST".into(),
+            parameters: vec![field.clone()],
+            criteria: vec![],
+            examples: vec![],
+            diagnostics: vec![],
+        };
+        assert!(bundle_support_issues(&schema).is_empty());
+        for (raw, valid) in [
+            ("11AG", true),
+            ("11AX", true),
+            ("11BE", true),
+            ("11ag", false),
+            ("11A!", false),
+        ] {
+            let mut issues = vec![];
+            validate_value(
+                &field,
+                &Value::Single(raw.into()),
+                Encoding::Named,
+                "params.STANDARD",
+                &mut issues,
+            );
+            assert_eq!(issues.is_empty(), valid, "{raw}: {issues:?}");
+        }
+    }
 }
