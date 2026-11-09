@@ -102,6 +102,10 @@ Initial profiles cover these encodings, only when the selected metadata is compa
 
 Other functions remain discoverable and return explicit unsupported diagnostics. Positional encodings and QSPR dictionary-to-script aliases are not implemented. Composition-support metadata means the profile and selected definitions pass static checks; it does not prove compatibility with an external script engine. Production database contents have not been queried or tested during this implementation.
 
+### Database-driven grammar (ADR-0006)
+
+When the catalog exposes the web project's `mcp_v1_*` views (web migration 0008, web ADR-0012), the grammar profiles and script-key allowlists above come from the database instead of the built-in lists: `mcp_v1_functions.grammar_encoding`/`grammar_scope` select the profile (raw needs convention 1, named needs convention 2; scope `line` enables lines and bundles, `bundle` enables INI bundles only), and `mcp_v1_script_key_audits` lists the audited named keys. A catalog row with no grammar is unsupported even if it matches a built-in profile. Migration 0008 seeds exactly the built-in profiles, so behavior is unchanged until reviewers audit more functions in the web app's **MCP readiness** tab. Catalogs without the views keep the built-in profiles.
+
 Patterns are descriptive templates: literal text with `<name>` placeholders, or a uniform repeated MULTIPLE template such as `<ant1>,<ant2>...`. Supported types are `string`, `int`, `double`, and `list[int]`. Allowed values may be empty, `{a,b}`, or a finite numeric range `[lower..upper]`. Missing patterns, unsupported optional syntax, unknown types, and orphan links block composition.
 
 Pipes and line breaks are forbidden; there is no escaping scheme. Named assignments reserve `&` and `=`; raw payloads preserve them. Duplicate assignment keys are invalid. Unknown parameter keys are rejected. Unknown named criteria are retained with warnings after syntax checks. Omitted optional criteria, including an empty criteria map, emit `NULL`. A supplied empty field value is rejected.

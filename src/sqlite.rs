@@ -54,6 +54,7 @@ impl Catalog for SqliteCatalog {
                     execution_role: row.get("execution_role")?,
                     execution_phase: row.get("execution_phase")?,
                     composition_supported: false,
+                    audited_grammar: None,
                 })
             },
         )?;

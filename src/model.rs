@@ -14,6 +14,29 @@ pub struct Function {
     pub execution_role: String,
     pub execution_phase: String,
     pub composition_supported: bool,
+    /// Audited script grammar from the catalog's `mcp_v1_*` views (web
+    /// ADR-0012). `None` means the catalog predates the contract and the
+    /// built-in profiles apply.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub audited_grammar: Option<AuditedGrammar>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditedGrammar {
+    /// "raw", "named", or "" when this function has not been audited.
+    pub encoding: String,
+    /// "line" (lines and bundles) or "bundle" (INI bundles only).
+    pub scope: String,
+    pub script_keys: Vec<ScriptKeyAudit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScriptKeyAudit {
+    pub criterion: bool,
+    pub name: String,
+    /// "line" or "bundle".
+    pub scope: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

@@ -3,18 +3,23 @@ use std::collections::BTreeMap;
 use regex::Regex;
 
 use crate::model::{
-    ComposeRequest, ComposeResult, CriteriaInput, Definition, Diagnostic, Field, Function,
-    FunctionSchema, Severity, Value,
+    AuditedGrammar, ComposeRequest, ComposeResult, CriteriaInput, Definition, Diagnostic, Field,
+    Function, FunctionSchema, Severity, Value,
 };
 use crate::{Error, Result};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Encoding {
     Raw,
     Named,
 }
 
 pub(crate) fn profile(function: &Function) -> Option<Encoding> {
+    if let Some(grammar) = &function.audited_grammar {
+        return (grammar.scope == "line")
+            .then(|| audited_encoding(function, grammar))
+            .flatten();
+    }
     if function.source == "BUILT-IN"
         && function.interface == "SSH"
         && matches!(
@@ -49,7 +54,22 @@ pub(crate) fn diagnostic(
     }
 }
 
+/// The encoding an audited catalog row grants, provided the function's
+/// convention matches it (raw lines are convention 1, named lines 2).
+fn audited_encoding(function: &Function, grammar: &AuditedGrammar) -> Option<Encoding> {
+    match (grammar.encoding.as_str(), function.convention) {
+        ("raw", Some(1)) => Some(Encoding::Raw),
+        ("named", Some(2)) => Some(Encoding::Named),
+        _ => None,
+    }
+}
+
 pub(crate) fn bundle_profile(function: &Function) -> Option<Encoding> {
+    if let Some(grammar) = &function.audited_grammar {
+        return matches!(grammar.scope.as_str(), "line" | "bundle")
+            .then(|| audited_encoding(function, grammar))
+            .flatten();
+    }
     profile(function).or_else(|| {
         (function.source == "DLL"
             && ((function.interface == "WIFI_TEST"
@@ -178,9 +198,16 @@ fn support_issues_with_bundle_keys(schema: &FunctionSchema, bundle: bool) -> Vec
                         ) || (schema.function.interface == "IOT"
                             && matches!(field.name.as_str(), "TECH" | "DUT_NAME" | "DUT_CASE"))
                     };
+            let audited_key = schema.function.audited_grammar.as_ref().map(|grammar| {
+                grammar.script_keys.iter().any(|audit| {
+                    audit.criterion == (prefix == "criteria")
+                        && audit.name == field.name
+                        && (audit.scope == "line" || (bundle && audit.scope == "bundle"))
+                })
+            });
             if encoding == Encoding::Named
-                && !known_key(&field.name, prefix == "criteria")
-                && !bundle_key
+                && !audited_key
+                    .unwrap_or_else(|| known_key(&field.name, prefix == "criteria") || bundle_key)
             {
                 issues.push(diagnostic(
                     &key,
@@ -928,5 +955,106 @@ mod tests {
             );
             assert_eq!(issues.is_empty(), valid, "{raw}: {issues:?}");
         }
+    }
+
+    fn audited(encoding: &str, scope: &str, keys: &[(bool, &str, &str)]) -> AuditedGrammar {
+        AuditedGrammar {
+            encoding: encoding.into(),
+            scope: scope.into(),
+            script_keys: keys
+                .iter()
+                .map(|(criterion, name, scope)| crate::model::ScriptKeyAudit {
+                    criterion: *criterion,
+                    name: (*name).into(),
+                    scope: (*scope).into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn named_schema(name: &str, grammar: Option<AuditedGrammar>, keys: &[&str]) -> FunctionSchema {
+        FunctionSchema {
+            function: Function {
+                source: "DLL".into(),
+                interface: "WIFI_TEST".into(),
+                name: name.into(),
+                convention: Some(2),
+                audited_grammar: grammar,
+                ..Function::default()
+            },
+            device_scope: "WIFI_TEST".into(),
+            parameters: keys
+                .iter()
+                .map(|key| Field {
+                    name: (*key).into(),
+                    device_name: "WIFI_TEST".into(),
+                    position: Some(1),
+                    required: true,
+                    definition: Some(Definition {
+                        kind: "string".into(),
+                        cardinality: "SINGLE".into(),
+                        value_pattern: "<v>".into(),
+                        ..Definition::default()
+                    }),
+                })
+                .collect(),
+            criteria: vec![],
+            examples: vec![],
+            diagnostics: vec![],
+        }
+    }
+
+    #[test]
+    fn audited_grammar_replaces_built_in_profiles() {
+        let mut function = named_schema("NEW_DLL_FN", None, &[]).function;
+        assert_eq!(profile(&function), None);
+        function.audited_grammar = Some(audited("named", "line", &[]));
+        assert_eq!(profile(&function), Some(Encoding::Named));
+        assert_eq!(bundle_profile(&function), Some(Encoding::Named));
+        function.audited_grammar = Some(audited("named", "bundle", &[]));
+        assert_eq!(profile(&function), None);
+        assert_eq!(bundle_profile(&function), Some(Encoding::Named));
+        function.audited_grammar = Some(audited("raw", "line", &[]));
+        assert_eq!(profile(&function), None, "raw requires convention 1");
+
+        let mut tx = named_schema("TX_MULTI_VERIFICATION", None, &[]).function;
+        assert_eq!(profile(&tx), Some(Encoding::Named));
+        tx.audited_grammar = Some(AuditedGrammar::default());
+        assert_eq!(
+            profile(&tx),
+            None,
+            "unaudited catalog row overrides built-in"
+        );
+        assert_eq!(bundle_profile(&tx), None);
+    }
+
+    #[test]
+    fn audited_script_keys_replace_built_in_allowlists() {
+        let grammar = audited(
+            "named",
+            "line",
+            &[(false, "CUSTOM", "line"), (false, "SWEEP", "bundle")],
+        );
+        let schema = named_schema("NEW_DLL_FN", Some(grammar), &["CUSTOM", "SWEEP"]);
+        let line: Vec<_> = support_issues(&schema)
+            .into_iter()
+            .map(|issue| issue.field)
+            .collect();
+        assert_eq!(line, vec!["params.SWEEP".to_string()]);
+        assert!(bundle_support_issues(&schema).is_empty());
+
+        let schema = named_schema(
+            "TX_MULTI_VERIFICATION",
+            Some(audited("named", "line", &[])),
+            &["ANT"],
+        );
+        assert_eq!(
+            support_issues(&schema)
+                .into_iter()
+                .map(|issue| issue.field)
+                .collect::<Vec<_>>(),
+            vec!["params.ANT".to_string()],
+            "built-in ANT allowlist must not apply once the catalog audits keys"
+        );
     }
 }

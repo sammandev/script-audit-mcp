@@ -1,4 +1,4 @@
-use std::{env, fs, time::Duration};
+use std::{collections::BTreeMap, env, fs, time::Duration};
 
 use native_tls::{Certificate, Protocol, TlsConnector};
 use postgres::{Client, Config, IsolationLevel, NoTls, Row, Transaction, config::SslMode};
@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::{
     Catalog, Error, Result,
-    model::{Definition, Example, Function, Link, Snapshot},
+    model::{AuditedGrammar, Definition, Example, Function, Link, ScriptKeyAudit, Snapshot},
 };
 
 #[derive(Clone)]
@@ -91,9 +91,23 @@ impl Catalog for PostgresCatalog {
             .read_only(true)
             .start()?;
         transaction.batch_execute("SET LOCAL statement_timeout = '15s'")?;
-        let functions = rows(
+        // Catalogs carrying the web ADR-0012 contract expose `mcp_v1_*` views
+        // with audited grammar; older catalogs fall back to the base tables
+        // and the built-in grammar profiles.
+        let contract: bool = transaction
+            .query_one("SELECT to_regclass('mcp_v1_functions') IS NOT NULL", &[])?
+            .try_get(0)?;
+        let prefix = if contract { "mcp_v1_" } else { "" };
+        let grammar_columns = if contract {
+            ", grammar_encoding, grammar_scope"
+        } else {
+            ""
+        };
+        let mut functions = rows(
             &mut transaction,
-            "SELECT source, interface, name, description, convention, category, execution_role, execution_phase FROM functions ORDER BY source, interface, name",
+            &format!(
+                "SELECT source, interface, name, description, convention, category, execution_role, execution_phase{grammar_columns} FROM {prefix}functions ORDER BY source, interface, name"
+            ),
             |row| {
                 Ok(Function {
                     source: row.try_get("source")?,
@@ -105,16 +119,65 @@ impl Catalog for PostgresCatalog {
                     execution_role: row.try_get("execution_role")?,
                     execution_phase: row.try_get("execution_phase")?,
                     composition_supported: false,
+                    audited_grammar: if contract {
+                        Some(AuditedGrammar {
+                            encoding: row.try_get("grammar_encoding")?,
+                            scope: row.try_get("grammar_scope")?,
+                            script_keys: Vec::new(),
+                        })
+                    } else {
+                        None
+                    },
                 })
             },
         )?;
-        let parameter_definitions = definitions(&mut transaction, "parameter_definitions")?;
-        let criteria_definitions = definitions(&mut transaction, "criteria_definitions")?;
-        let parameter_links = links(&mut transaction, "parameter_links")?;
-        let criteria_links = links(&mut transaction, "criteria_links")?;
+        if contract {
+            let audits = rows(
+                &mut transaction,
+                "SELECT function_source, function_interface, function_name, kind, name, scope FROM mcp_v1_script_key_audits ORDER BY function_source, function_interface, function_name, kind, name",
+                |row| {
+                    Ok((
+                        (
+                            row.try_get::<_, String>("function_source")?,
+                            row.try_get::<_, String>("function_interface")?,
+                            row.try_get::<_, String>("function_name")?,
+                        ),
+                        ScriptKeyAudit {
+                            criterion: row.try_get::<_, String>("kind")? == "criterion",
+                            name: row.try_get("name")?,
+                            scope: row.try_get("scope")?,
+                        },
+                    ))
+                },
+            )?;
+            let mut by_function: BTreeMap<(String, String, String), Vec<ScriptKeyAudit>> =
+                BTreeMap::new();
+            for (key, audit) in audits {
+                by_function.entry(key).or_default().push(audit);
+            }
+            for function in &mut functions {
+                if let Some(grammar) = &mut function.audited_grammar
+                    && let Some(keys) = by_function.remove(&(
+                        function.source.clone(),
+                        function.interface.clone(),
+                        function.name.clone(),
+                    ))
+                {
+                    grammar.script_keys = keys;
+                }
+            }
+        }
+        let parameter_definitions =
+            definitions(&mut transaction, &format!("{prefix}parameter_definitions"))?;
+        let criteria_definitions =
+            definitions(&mut transaction, &format!("{prefix}criteria_definitions"))?;
+        let parameter_links = links(&mut transaction, &format!("{prefix}parameter_links"))?;
+        let criteria_links = links(&mut transaction, &format!("{prefix}criteria_links"))?;
         let examples = rows(
             &mut transaction,
-            "SELECT function_source, device_name, function_name, script, meaning FROM examples ORDER BY id",
+            &format!(
+                "SELECT function_source, device_name, function_name, script, meaning FROM {prefix}examples ORDER BY id"
+            ),
             |row| {
                 Ok(Example {
                     function_source: row.try_get("function_source")?,
@@ -279,6 +342,70 @@ mod tests {
         assert_eq!(snapshot.parameter_links[0].position, None);
         assert!(snapshot.parameter_links[0].required);
         assert_eq!(snapshot.criteria_links[0].position, Some(2));
+        assert_eq!(snapshot.examples.len(), 1);
+        assert!(snapshot.functions[0].audited_grammar.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_snapshot_reads_mcp_v1_contract_grammar() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let mut connection = fixture.catalog.connect()?;
+        connection.batch_execute(
+            // The fixture's `functions` view reports every source as BUILT-IN
+            // (snapshot-mode guard), so grammar rows use that source too.
+            "INSERT INTO functions_data (source, interface, name, convention)
+             VALUES ('DLL', 'WIFI_TEST', 'TX_MULTI_VERIFICATION', 2);
+             CREATE TABLE function_grammars (function_source TEXT, function_interface TEXT,
+                 function_name TEXT, encoding TEXT, scope TEXT);
+             INSERT INTO function_grammars VALUES ('BUILT-IN', 'WIFI_TEST', 'TX_MULTI_VERIFICATION', 'named', 'line');
+             CREATE VIEW mcp_v1_functions AS
+             SELECT f.source, f.interface, f.name, f.description, f.convention, f.category,
+                    f.execution_role, f.execution_phase,
+                    COALESCE(g.encoding, '') AS grammar_encoding, COALESCE(g.scope, '') AS grammar_scope
+             FROM functions f LEFT JOIN function_grammars g
+               ON g.function_source = f.source AND g.function_interface = f.interface
+              AND g.function_name = f.name;
+             CREATE VIEW mcp_v1_script_key_audits AS
+             SELECT 'BUILT-IN'::TEXT AS function_source, 'WIFI_TEST'::TEXT AS function_interface,
+                    'TX_MULTI_VERIFICATION'::TEXT AS function_name, 'parameter'::TEXT AS kind,
+                    'ANT'::TEXT AS name, 'line'::TEXT AS scope;
+             CREATE VIEW mcp_v1_parameter_definitions AS SELECT * FROM parameter_definitions;
+             CREATE VIEW mcp_v1_criteria_definitions AS SELECT * FROM criteria_definitions;
+             CREATE VIEW mcp_v1_parameter_links AS SELECT * FROM parameter_links;
+             CREATE VIEW mcp_v1_criteria_links AS SELECT * FROM criteria_links;
+             CREATE VIEW mcp_v1_examples AS SELECT * FROM examples;",
+        )?;
+        let snapshot = fixture.catalog.snapshot()?;
+        assert_eq!(snapshot.functions.len(), 2);
+        let tx = snapshot
+            .functions
+            .iter()
+            .find(|function| function.name == "TX_MULTI_VERIFICATION")
+            .ok_or_else(|| Error::Knowledge("missing TX row".into()))?;
+        assert_eq!(
+            tx.audited_grammar,
+            Some(AuditedGrammar {
+                encoding: "named".into(),
+                scope: "line".into(),
+                script_keys: vec![ScriptKeyAudit {
+                    criterion: false,
+                    name: "ANT".into(),
+                    scope: "line".into(),
+                }],
+            })
+        );
+        let ssh = snapshot
+            .functions
+            .iter()
+            .find(|function| function.name == "SENDSTR")
+            .ok_or_else(|| Error::Knowledge("missing SSH row".into()))?;
+        assert_eq!(
+            ssh.audited_grammar,
+            Some(AuditedGrammar::default()),
+            "unaudited rows must not fall back to built-in profiles"
+        );
+        assert_eq!(snapshot.parameter_links.len(), 1);
         assert_eq!(snapshot.examples.len(), 1);
         Ok(())
     }
