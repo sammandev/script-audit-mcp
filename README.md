@@ -17,6 +17,29 @@ export PGPASSWORD
 
 The old `--db` argument and `SCRIPT_FORGE_DB` file configuration are removed. Missing configuration, connection failures, and incompatible schemas fail startup. `--help` writes usage to stderr; stdout is reserved for MCP messages. Every request reads the six catalog tables in a read-only repeatable-read transaction on a blocking worker. Use a SELECT-only database login as a second write barrier.
 
+### PostgreSQL contract tests
+
+The `postgres_snapshot_reads_real_mcp_v1_views` test applies the web
+application's PostgreSQL migrations in a uniquely named schema and removes that
+schema after the test. Set `TEST_DATABASE_URL` to an authorized disposable test
+database and `WEB_POSTGRES_MIGRATIONS_DIR` to the web repository's
+`backend/internal/db/postgres_migrations` directory. The user runs database
+tests on the approved host; the agent does not access that host. Never point
+these tests at the production catalog.
+
+For the cross-repository readiness check, run this from the MCP repository on
+the approved host:
+
+```bash
+export TEST_DATABASE_URL='<disposable test database URL>'
+python deploy/mcp-parity.py --web-repo /path/to/Web_Program_Functions_Database
+```
+
+The runner builds the web API, applies the web migrations in a temporary schema,
+and compares every Function's web readiness with the MCP `list_functions`
+composition flag. It requires Go, Rust, and Python; never point it at the
+production catalog.
+
 Example stdio client configuration, replacing the binary path and inheriting its password from a protected launch environment:
 Existing MCP clients must update their command and project-specific database URL variable to the new names shown below.
 

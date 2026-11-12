@@ -253,6 +253,10 @@ fn links(transaction: &mut Transaction<'_>, table: &str) -> Result<Vec<Link>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        process::{Child, Command, Stdio},
+    };
 
     struct Fixture {
         admin: Client,
@@ -261,10 +265,10 @@ mod tests {
     }
 
     impl Fixture {
-        fn new() -> Result<Self> {
+        fn empty() -> Result<Self> {
             let dsn = env::var("TEST_DATABASE_URL").map_err(|_| Error::InvalidInput {
                 field: "TEST_DATABASE_URL".into(),
-                message: "PostgreSQL fixture tests require an authorized local test database"
+                message: "PostgreSQL fixture tests require an authorized disposable test database"
                     .into(),
             })?;
             let mut catalog = PostgresCatalog::new(&dsn)?;
@@ -273,14 +277,21 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|error| Error::Knowledge(error.to_string()))?
                 .as_nanos();
-            let schema = format!("sf_test_{}_{}", std::process::id(), stamp);
+            // Parallel tests can read the same coarse Windows clock tick.
+            static NEXT_SCHEMA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = NEXT_SCHEMA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let schema = format!("sf_test_{}_{}_{}", std::process::id(), stamp, sequence);
             admin.batch_execute(&format!("CREATE SCHEMA {schema}"))?;
             catalog.config.options(&format!("-c search_path={schema}"));
-            let fixture = Self {
+            Ok(Self {
                 admin,
                 schema,
                 catalog,
-            };
+            })
+        }
+
+        fn new() -> Result<Self> {
+            let fixture = Self::empty()?;
             let mut connection = fixture.catalog.connect()?;
             let sql = include_str!("../tests/fixtures/schema.sql")
                 .replace(
@@ -318,6 +329,92 @@ mod tests {
             )?;
             Ok(fixture)
         }
+
+        fn new_web_contract() -> Result<Self> {
+            let fixture = Self::empty()?;
+            let migration_dir =
+                env::var("WEB_POSTGRES_MIGRATIONS_DIR").map_err(|_| Error::InvalidInput {
+                    field: "WEB_POSTGRES_MIGRATIONS_DIR".into(),
+                    message: "set this to the web repository's postgres_migrations directory"
+                        .into(),
+                })?;
+            let mut migrations = Vec::new();
+            for entry in fs::read_dir(&migration_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !entry.file_type()?.is_file()
+                    || path.extension().and_then(|extension| extension.to_str()) != Some("sql")
+                {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let version = name
+                    .split_once('_')
+                    .map(|(version, _)| version)
+                    .ok_or_else(|| Error::Knowledge(format!("invalid migration filename: {name}")))?
+                    .parse::<i32>()
+                    .map_err(|error| {
+                        Error::Knowledge(format!("invalid migration version in {name}: {error}"))
+                    })?;
+                migrations.push((version, name, path));
+            }
+            migrations.sort_by_key(|(version, _, _)| *version);
+            if migrations.is_empty() {
+                return Err(Error::Knowledge(format!(
+                    "no PostgreSQL migration SQL files found in {migration_dir}"
+                )));
+            }
+            for pair in migrations.windows(2) {
+                if pair[0].0 == pair[1].0 {
+                    return Err(Error::Knowledge(format!(
+                        "duplicate PostgreSQL migration version {}",
+                        pair[0].0
+                    )));
+                }
+            }
+
+            let mut connection = fixture.catalog.connect()?;
+            connection.batch_execute(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                )",
+            )?;
+            for (version, name, path) in migrations {
+                let sql = fs::read_to_string(path)?;
+                connection.batch_execute(&sql)?;
+                connection.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at)
+                     VALUES ($1, $2, 'fixture')",
+                    &[&version, &name],
+                )?;
+            }
+            Ok(fixture)
+        }
+
+        fn web_database_url(&self) -> Result<String> {
+            let dsn = env::var("TEST_DATABASE_URL").map_err(|_| Error::InvalidInput {
+                field: "TEST_DATABASE_URL".into(),
+                message: "set this to an authorized disposable test database".into(),
+            })?;
+            let mut url = Url::parse(&dsn).map_err(|_| Error::InvalidInput {
+                field: "TEST_DATABASE_URL".into(),
+                message: "expected a PostgreSQL URL".into(),
+            })?;
+            let mut pairs = url
+                .query_pairs()
+                .filter(|(key, _)| key != "search_path")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            url.query_pairs_mut().clear();
+            for (key, value) in pairs.drain(..) {
+                url.query_pairs_mut().append_pair(&key, &value);
+            }
+            url.query_pairs_mut()
+                .append_pair("search_path", &self.schema);
+            Ok(url.to_string())
+        }
     }
 
     impl Drop for Fixture {
@@ -326,6 +423,96 @@ mod tests {
                 .admin
                 .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema));
         }
+    }
+
+    struct WebApi {
+        child: Child,
+        address: String,
+    }
+
+    impl WebApi {
+        fn start(binary: &std::ffi::OsStr, database_url: &str) -> Result<Self> {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?.to_string();
+            drop(listener);
+            let child = Command::new(binary)
+                .arg("--addr")
+                .arg(&address)
+                .env("DATABASE_URL", database_url)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let mut api = Self { child, address };
+            api.wait_until_ready()?;
+            Ok(api)
+        }
+
+        fn wait_until_ready(&mut self) -> Result<()> {
+            let mut last_error = "no health response".to_string();
+            for _ in 0..50 {
+                if let Some(status) = self.child.try_wait()? {
+                    return Err(Error::Knowledge(format!(
+                        "web API exited before becoming ready ({status})"
+                    )));
+                }
+                match http_get(&self.address, "/health") {
+                    Ok((200, body)) if body.contains("\"status\":\"ok\"") => return Ok(()),
+                    Ok((status, _)) => {
+                        last_error = format!("health endpoint returned HTTP {status}")
+                    }
+                    Err(error) => last_error = error.to_string(),
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(Error::Knowledge(format!(
+                "web API did not become ready: {last_error}"
+            )))
+        }
+
+        fn readiness(&self) -> Result<serde_json::Value> {
+            let (status, body) = http_get(&self.address, "/api/mcp-readiness")?;
+            if status != 200 {
+                return Err(Error::Knowledge(format!(
+                    "web readiness endpoint returned HTTP {status}"
+                )));
+            }
+            serde_json::from_str(&body)
+                .map_err(|error| Error::Knowledge(format!("invalid readiness JSON: {error}")))
+        }
+    }
+
+    impl Drop for WebApi {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn http_get(address: &str, path: &str) -> Result<(u16, String)> {
+        let socket = address
+            .parse()
+            .map_err(|error| Error::Knowledge(format!("invalid loopback address: {error}")))?;
+        let mut stream = std::net::TcpStream::connect_timeout(&socket, Duration::from_secs(1))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+        )?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response)?;
+        let response = String::from_utf8(response)
+            .map_err(|error| Error::Knowledge(format!("invalid HTTP response: {error}")))?;
+        let (headers, body) = response
+            .split_once("\r\n\r\n")
+            .ok_or_else(|| Error::Knowledge("malformed HTTP response".into()))?;
+        let status = headers
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .ok_or_else(|| Error::Knowledge("missing HTTP status".into()))?
+            .parse::<u16>()
+            .map_err(|error| Error::Knowledge(format!("invalid HTTP status: {error}")))?;
+        Ok((status, body.to_string()))
     }
 
     #[test]
@@ -407,6 +594,198 @@ mod tests {
         );
         assert_eq!(snapshot.parameter_links.len(), 1);
         assert_eq!(snapshot.examples.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_snapshot_reads_real_mcp_v1_views() -> Result<()> {
+        let fixture = Fixture::new_web_contract()?;
+        let mut connection = fixture.catalog.connect()?;
+        connection.batch_execute(
+            "INSERT INTO functions (source, interface, name, convention, created_at, updated_at)
+             VALUES
+                 ('DLL', 'WIFI_TEST', 'TX_MULTI_VERIFICATION', 2, 'fixture', 'fixture'),
+                 ('DLL', 'WIFI_TEST', 'DUPLICATE', 2, 'fixture', 'fixture'),
+                 ('DLL', 'IOT', 'DUPLICATE', 2, 'fixture', 'fixture');
+             INSERT INTO parameter_definitions (
+                 name, device_name, type, cardinality, value_pattern, required, created_at, updated_at
+             ) VALUES ('ANT', 'WIFI_TEST', 'int', 'MULTIPLE', '<ant>', 1, 'fixture', 'fixture');
+             INSERT INTO criteria_definitions (
+                 name, device_name, type, cardinality, value_pattern, created_at, updated_at
+             ) VALUES ('POWER', 'WIFI_TEST', 'double', 'SINGLE', '<power>', 'fixture', 'fixture');
+             INSERT INTO parameter_links (
+                 function_source, function_name, device_name, name, position, required,
+                 created_at, updated_at
+             ) VALUES
+                 ('DLL', 'TX_MULTI_VERIFICATION', 'WIFI_TEST', 'ANT', 1, 1, 'fixture', 'fixture'),
+                 ('DLL', 'DUPLICATE', '', 'ANT', 1, 1, 'fixture', 'fixture');
+             INSERT INTO criteria_links (
+                 function_source, function_name, device_name, name, position, required,
+                 created_at, updated_at
+             ) VALUES ('DLL', 'TX_MULTI_VERIFICATION', 'WIFI_TEST', 'POWER', 2, 0, 'fixture', 'fixture');
+             INSERT INTO examples (
+                 function_source, function_name, device_name, script, meaning, created_at, updated_at
+             ) VALUES
+                 ('DLL', 'TX_MULTI_VERIFICATION', 'WIFI_TEST', 'DLLWIFI_TEST|TX_MULTI_VERIFICATION', 'unique', 'fixture', 'fixture'),
+                 ('DLL', 'DUPLICATE', '', 'DLLWIFI_TEST|DUPLICATE', 'ambiguous', 'fixture', 'fixture');",
+        )?;
+
+        let snapshot = fixture.catalog.snapshot()?;
+        assert_eq!(snapshot.functions.len(), 3);
+        assert_eq!(snapshot.parameter_definitions.len(), 1);
+        assert_eq!(snapshot.criteria_definitions.len(), 1);
+        assert_eq!(snapshot.parameter_links.len(), 2);
+        assert_eq!(snapshot.criteria_links.len(), 1);
+        assert_eq!(snapshot.examples.len(), 2);
+
+        let tx = snapshot
+            .functions
+            .iter()
+            .find(|function| function.name == "TX_MULTI_VERIFICATION")
+            .ok_or_else(|| Error::Knowledge("missing TX row".into()))?;
+        let grammar = tx
+            .audited_grammar
+            .as_ref()
+            .ok_or_else(|| Error::Knowledge("missing audited grammar".into()))?;
+        assert_eq!(grammar.encoding, "named");
+        assert_eq!(grammar.scope, "line");
+        assert!(
+            grammar
+                .script_keys
+                .iter()
+                .any(|audit| { !audit.criterion && audit.name == "ANT" && audit.scope == "line" })
+        );
+        assert_eq!(snapshot.parameter_definitions[0].name, "ANT");
+        assert!(snapshot.parameter_definitions[0].required);
+        assert_eq!(snapshot.criteria_definitions[0].name, "POWER");
+        assert_eq!(
+            snapshot.parameter_links[0].function_name,
+            "TX_MULTI_VERIFICATION"
+        );
+        assert_eq!(snapshot.criteria_links[0].name, "POWER");
+        assert_eq!(snapshot.examples[0].meaning, "unique");
+
+        let unique_link_interface: String = connection
+            .query_one(
+                "SELECT function_interface FROM mcp_v1_parameter_links
+                 WHERE function_name = 'TX_MULTI_VERIFICATION'",
+                &[],
+            )?
+            .try_get(0)?;
+        let ambiguous_link_interface: String = connection
+            .query_one(
+                "SELECT function_interface FROM mcp_v1_parameter_links
+                 WHERE function_name = 'DUPLICATE'",
+                &[],
+            )?
+            .try_get(0)?;
+        let unique_example_interface: String = connection
+            .query_one(
+                "SELECT function_interface FROM mcp_v1_examples
+                 WHERE function_name = 'TX_MULTI_VERIFICATION'",
+                &[],
+            )?
+            .try_get(0)?;
+        let ambiguous_example_interface: String = connection
+            .query_one(
+                "SELECT function_interface FROM mcp_v1_examples
+                 WHERE function_name = 'DUPLICATE'",
+                &[],
+            )?
+            .try_get(0)?;
+        assert_eq!(unique_link_interface, "WIFI_TEST");
+        assert_eq!(ambiguous_link_interface, "");
+        assert_eq!(unique_example_interface, "WIFI_TEST");
+        assert_eq!(ambiguous_example_interface, "");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "run via deploy/mcp-parity.py against a disposable test database"]
+    fn postgres_readiness_matches_mcp_list_functions() -> Result<()> {
+        let binary = env::var_os("WEB_API_BINARY").ok_or_else(|| Error::InvalidInput {
+            field: "WEB_API_BINARY".into(),
+            message: "run this test through deploy/mcp-parity.py".into(),
+        })?;
+        let fixture = Fixture::new_web_contract()?;
+        let mut connection = fixture.catalog.connect()?;
+        connection.batch_execute(
+            "INSERT INTO functions (source, interface, name, convention, created_at, updated_at)
+             VALUES
+                 ('DLL', 'WIFI_TEST', 'TX_MULTI_VERIFICATION', 2, 'fixture', 'fixture'),
+                 ('DLL', 'WIFI_TEST', 'RX_VERIFY_PER', 2, 'fixture', 'fixture'),
+                 ('DLL', 'WIFI_TEST', 'NOT_AUDITED', 2, 'fixture', 'fixture'),
+                 ('DLL', 'WIFI_TEST', 'DUPLICATE', 2, 'fixture', 'fixture'),
+                 ('DLL', 'IOT', 'DUPLICATE', 2, 'fixture', 'fixture');",
+        )?;
+        let api = WebApi::start(&binary, &fixture.web_database_url()?)?;
+        let readiness = api.readiness()?;
+        let items = readiness
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| Error::Knowledge("readiness response has no items array".into()))?;
+        let mut web_status = BTreeMap::new();
+        for item in items {
+            let source = item
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::Knowledge("readiness item has no source".into()))?;
+            let interface = item
+                .get("interface")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::Knowledge("readiness item has no interface".into()))?;
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::Knowledge("readiness item has no name".into()))?;
+            let status = item
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::Knowledge("readiness item has no status".into()))?;
+            web_status.insert(
+                (source.to_string(), interface.to_string(), name.to_string()),
+                status.to_string(),
+            );
+        }
+
+        let engine = crate::Engine::new(fixture.catalog.snapshot()?);
+        let mcp_functions = engine.list_functions(None)?;
+        let mcp_support = mcp_functions
+            .into_iter()
+            .map(|function| {
+                (
+                    (function.source, function.interface, function.name),
+                    function.composition_supported,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(web_status.len(), mcp_support.len());
+        for (key, status) in &web_status {
+            let supported = mcp_support
+                .get(key)
+                .ok_or_else(|| Error::Knowledge(format!("MCP is missing Function {key:?}")))?;
+            assert_eq!(
+                status == "ready",
+                *supported,
+                "readiness mismatch for {key:?}: web status {status}"
+            );
+        }
+        assert_eq!(
+            web_status.get(&(
+                "DLL".to_string(),
+                "WIFI_TEST".to_string(),
+                "TX_MULTI_VERIFICATION".to_string(),
+            )),
+            Some(&"ready".to_string())
+        );
+        assert_eq!(
+            web_status.get(&(
+                "DLL".to_string(),
+                "WIFI_TEST".to_string(),
+                "RX_VERIFY_PER".to_string(),
+            )),
+            Some(&"bundle_ready".to_string())
+        );
         Ok(())
     }
 
