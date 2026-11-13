@@ -120,6 +120,8 @@ impl Engine {
             device_scope: device_scope.map(str::to_string),
             params: BTreeMap::new(),
             criteria: CriteriaInput::default(),
+            param_sections: Vec::new(),
+            criteria_sections: Vec::new(),
             timeout,
             pass_path: segments.get(5).cloned(),
             fail_path: segments.get(6).cloned(),
@@ -137,7 +139,7 @@ impl Engine {
                 ));
                 if function.and_then(grammar::profile) == Some(grammar::Encoding::Named) {
                     grammar::parse_fields(
-                        &segments[2],
+                        &grammar::split_section_references(&segments[2]).0,
                         &[],
                         grammar::Encoding::Named,
                         false,
@@ -145,7 +147,7 @@ impl Engine {
                     );
                     if segments[3] != "NULL" && !segments[3].is_empty() {
                         grammar::parse_fields(
-                            &segments[3],
+                            &grammar::split_section_references(&segments[3]).0,
                             &[],
                             grammar::Encoding::Named,
                             true,
@@ -192,8 +194,15 @@ impl Engine {
             _ => {}
         }
         if let Some(encoding) = grammar::profile(&schema.function) {
+            let named = encoding == grammar::Encoding::Named;
+            let (parameters, param_sections) = if named {
+                grammar::split_section_references(&segments[2])
+            } else {
+                (segments[2].clone(), Vec::new())
+            };
+            request.param_sections = param_sections;
             request.params = grammar::parse_fields(
-                &segments[2],
+                &parameters,
                 &schema.parameters,
                 encoding,
                 false,
@@ -201,11 +210,13 @@ impl Engine {
             );
             request.criteria = if segments[3] == "NULL" || segments[3].is_empty() {
                 CriteriaInput::default()
-            } else if encoding == grammar::Encoding::Raw {
+            } else if !named {
                 CriteriaInput::Raw(segments[3].clone())
             } else {
+                let (criteria, criteria_sections) = grammar::split_section_references(&segments[3]);
+                request.criteria_sections = criteria_sections;
                 CriteriaInput::Named(grammar::parse_fields(
-                    &segments[3],
+                    &criteria,
                     &schema.criteria,
                     encoding,
                     true,
@@ -222,6 +233,17 @@ impl Engine {
                 error.to_string(),
                 Severity::Incomplete,
             )),
+        }
+        if diagnostics
+            .iter()
+            .any(|issue| issue.code == "required_from_section")
+        {
+            diagnostics.push(grammar::diagnostic(
+                "line",
+                "section_reference_unresolved",
+                "required values are expected from a referenced section that line tools cannot read; validate the bundle to check them",
+                Severity::Incomplete,
+            ));
         }
         Ok(validation_report(segments, diagnostics))
     }

@@ -88,7 +88,7 @@ agent does not access Ubuntu or the production/deployment database.
 | `list_functions` | Optional `device`; returns functions and composition-support metadata |
 | `get_function` | `device`, `name`, optional `device_scope`; returns metadata, linked definitions, patterns, examples, diagnostics |
 | `suggest_criteria` | `device`, `function`, optional `device_scope`; returns known criteria and examples |
-| `compose_line` | `device`, `function`, `params`, `criteria`, `timeout`, optional `device_scope`, `pass_path`, `fail_path`, `error_code` |
+| `compose_line` | `device`, `function`, `params`, `criteria`, `timeout`, optional `device_scope`, `pass_path`, `fail_path`, `error_code`, `param_sections`, `criteria_sections` |
 | `validate_line` | `line`, optional `device_scope`; returns `valid`, `invalid`, or `incomplete`, original segments, and diagnostics |
 | `validate_ini_bundle` | `files`, `selected_flow`, `dialect`, optional `device_scope`, `runtime_bindings`, `sensitive_values`; returns preserved source and layered bundle findings |
 | `compare_plan_to_bundle` | `bundle` (the validation arguments), `plan`, explicit `flow_variant` (`normal` or `sampling`); returns sourced coverage, conflicts, blockers, and the shared validation report |
@@ -133,7 +133,7 @@ Patterns are descriptive templates: literal text with `<name>` placeholders, or 
 
 Pipes and line breaks are forbidden; there is no escaping scheme. Named assignments reserve `&` and `=`; raw payloads preserve them. Duplicate assignment keys are invalid. Unknown parameter keys are rejected. Unknown named criteria are retained with warnings after syntax checks. Omitted optional criteria, including an empty criteria map, emit `NULL`. A supplied empty field value is rejected.
 
-`*E:`, `*I:`, and `*T:` require a nonempty payload and are preserved with a warning. Runtime targets and resolved values are unchecked. Flow targets are also not checked against a runtime script. `valid` means the available static checks found no violation; inspect warnings. Known violations outrank incomplete checks.
+`*V:`, `*E:`, `*I:`, and `*T:` require a nonempty payload and a matching `#` (nested references need one `#` each); they are preserved with a warning (`bundle_reference_unchecked` for `*V:`, `runtime_reference_unchecked` otherwise). Line tools never resolve values. A value that is exactly one reference skips its pattern; a reference embedded in a value, such as `TX_TARGET_POWER=*V:Limits-Power#dBm`, is masked and the literal remainder must still match, otherwise the report is `incomplete` with `reference_pattern_unchecked`. For named profiles, a whole `*V:Section#` token merges a data section: pass it as `param_sections`/`criteria_sections` to `compose_line` (emitted first, joined with `&`). Required fields then become optional with `required_from_section` warnings, and `validate_line` reports `incomplete` (`section_reference_unresolved`) only when a required field relied on the section. Bundle validation resolves nested and indirect `*V:` references up to depth 16 (see ADR 0007). Runtime targets and resolved values are unchecked. Flow targets are also not checked against a runtime script. `valid` means the available static checks found no violation; inspect warnings. Known violations outrank incomplete checks.
 
 Domain failures are MCP tool errors with structured `error.code`, `error.message`, and `error.diagnostics`. Validation failures return a normal report with status `invalid`; they do not silently rewrite the submitted line.
 

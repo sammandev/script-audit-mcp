@@ -417,20 +417,64 @@ pub(crate) fn compose(schema: &FunctionSchema, request: &ComposeRequest) -> Resu
     let mut issues = fixed_issues(request, schema.function.convention);
     issues.extend(support_issues(schema));
     let encoding = profile(&schema.function);
+    for (sections, prefix) in [
+        (&request.param_sections, "params.sections"),
+        (&request.criteria_sections, "criteria.sections"),
+    ] {
+        if sections.is_empty() {
+            continue;
+        }
+        if encoding != Some(Encoding::Named) {
+            issues.push(diagnostic(
+                prefix,
+                "invalid_shape",
+                "whole-section references require a named key=value profile",
+                Severity::Error,
+            ));
+            continue;
+        }
+        for section in sections {
+            issues.push(if is_section_reference(section) {
+                diagnostic(
+                    prefix,
+                    "section_reference_unchecked",
+                    format!("{section} preserved; its keys and values are unchecked"),
+                    Severity::Warning,
+                )
+            } else {
+                diagnostic(
+                    prefix,
+                    "invalid_reference",
+                    "expected one whole-section reference such as *V:Section#",
+                    Severity::Error,
+                )
+            });
+        }
+    }
     let parameters = if let Some(encoding) = encoding {
-        emit_fields(
+        let fields = section_fields(
             &schema.parameters,
             &request.params,
-            encoding,
-            false,
+            &request.param_sections,
+            "params",
             &mut issues,
-        )
+        );
+        let emitted = emit_fields(&fields, &request.params, encoding, false, &mut issues);
+        with_sections(&request.param_sections, emitted)
     } else {
         String::new()
     };
     let criteria = match (&request.criteria, encoding) {
         (CriteriaInput::Named(values), Some(encoding)) => {
-            emit_fields(&schema.criteria, values, encoding, true, &mut issues)
+            let fields = section_fields(
+                &schema.criteria,
+                values,
+                &request.criteria_sections,
+                "criteria",
+                &mut issues,
+            );
+            let emitted = emit_fields(&fields, values, encoding, true, &mut issues);
+            with_sections(&request.criteria_sections, emitted)
         }
         (CriteriaInput::Raw(value), Some(Encoding::Raw)) => {
             if let Some(field) = schema.criteria.first() {
@@ -569,6 +613,139 @@ pub(crate) fn emit_fields(
     parts.join(if encoding == Encoding::Named { "&" } else { "" })
 }
 
+fn section_fields(
+    fields: &[Field],
+    values: &BTreeMap<String, Value>,
+    sections: &[String],
+    prefix: &str,
+    issues: &mut Vec<Diagnostic>,
+) -> Vec<Field> {
+    let mut fields = fields.to_vec();
+    if sections.is_empty() {
+        return fields;
+    }
+    for field in &mut fields {
+        if field.required && !values.contains_key(&field.name) {
+            issues.push(diagnostic(
+                &format!("{prefix}.{}", field.name),
+                "required_from_section",
+                "required value is not given inline; it is assumed to come from a referenced section",
+                Severity::Warning,
+            ));
+        }
+        field.required = false;
+    }
+    fields
+}
+
+fn with_sections(sections: &[String], emitted: String) -> String {
+    sections
+        .iter()
+        .cloned()
+        .chain((!emitted.is_empty()).then_some(emitted))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+const REFERENCE_SENTINEL: char = '\u{E000}';
+
+struct Reference {
+    start: usize,
+    end: usize,
+    kind: u8,
+}
+
+fn reference_opener(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index) == Some(&b'*')
+        && bytes.get(index + 1).is_some_and(u8::is_ascii_uppercase)
+        && bytes.get(index + 2) == Some(&b':')
+}
+
+/// Finds `*X:payload#` tokens; nested openers raise the depth so the matching `#` ends the token.
+fn references(raw: &str) -> std::result::Result<Vec<Reference>, ()> {
+    let bytes = raw.as_bytes();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !reference_opener(bytes, index) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut depth = 1;
+        index += 3;
+        let end = loop {
+            match bytes.get(index) {
+                None => return Err(()),
+                Some(b'#') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break index;
+                    }
+                    index += 1;
+                }
+                Some(_) if reference_opener(bytes, index) => {
+                    if !matches!(bytes.get(index + 1), Some(b'V' | b'E' | b'I' | b'T')) {
+                        return Err(());
+                    }
+                    depth += 1;
+                    index += 3;
+                }
+                Some(_) => index += 1,
+            }
+        };
+        if raw
+            .get(start + 3..end)
+            .is_none_or(|payload| payload.trim().is_empty())
+        {
+            return Err(());
+        }
+        found.push(Reference {
+            start,
+            end: end + 1,
+            kind: bytes.get(start + 1).copied().unwrap_or_default(),
+        });
+        index = end + 1;
+    }
+    Ok(found)
+}
+
+fn without_references(raw: &str, replacement: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut cursor = 0;
+    for reference in references(raw).ok()? {
+        output.push_str(raw.get(cursor..reference.start)?);
+        output.push_str(replacement);
+        cursor = reference.end;
+    }
+    output.push_str(raw.get(cursor..)?);
+    Some(output)
+}
+
+/// True for one `*V:Header#` token naming a whole data section (no top-level `-key`).
+pub(crate) fn is_section_reference(raw: &str) -> bool {
+    let Ok(found) = references(raw) else {
+        return false;
+    };
+    matches!(found.as_slice(), [reference]
+        if reference.start == 0 && reference.end == raw.len() && reference.kind == b'V')
+        && raw
+            .get(3..raw.len() - 1)
+            .and_then(|payload| without_references(payload, ""))
+            .is_some_and(|header| !header.contains('-'))
+}
+
+/// Separates standalone whole-section entries from `key=value` assignments in a named payload.
+pub(crate) fn split_section_references(raw: &str) -> (String, Vec<String>) {
+    let (sections, assignments): (Vec<_>, Vec<_>) = raw
+        .split('&')
+        .partition(|entry| is_section_reference(entry));
+    (
+        assignments.join("&"),
+        sections.into_iter().map(str::to_string).collect(),
+    )
+}
+
 fn validate_value(
     field: &Field,
     value: &Value,
@@ -606,37 +783,83 @@ fn validate_value(
             ));
             continue;
         }
-        if raw.starts_with('*') {
-            if ["*E:", "*I:", "*T:"].iter().any(|prefix| {
+        if raw.starts_with('*')
+            && ["*E:", "*I:", "*T:"].iter().any(|prefix| {
                 raw.strip_prefix(prefix)
                     .is_some_and(|tail| !tail.trim().is_empty())
-            }) {
-                issues.push(diagnostic(
-                    key,
-                    "runtime_reference_unchecked",
-                    "engine reference preserved; runtime target and value are unchecked",
-                    Severity::Warning,
-                ));
-            } else {
+            })
+        {
+            issues.push(diagnostic(
+                key,
+                "runtime_reference_unchecked",
+                "engine reference preserved; runtime target and value are unchecked",
+                Severity::Warning,
+            ));
+            continue;
+        }
+        let found = match references(raw) {
+            Ok(found)
+                if (!found.is_empty() || !raw.starts_with('*'))
+                    && found
+                        .iter()
+                        .all(|reference| matches!(reference.kind, b'V' | b'E' | b'I' | b'T')) =>
+            {
+                found
+            }
+            _ => {
                 issues.push(diagnostic(
                     key,
                     "invalid_reference",
-                    "expected *E:, *I:, or *T: followed by a nonempty payload",
+                    "expected *V:, *E:, *I:, or *T: references with a nonempty payload ending in #",
                     Severity::Error,
                 ));
+                continue;
             }
-            continue;
+        };
+        if !found.is_empty() {
+            let runtime = found.iter().any(|reference| reference.kind != b'V');
+            issues.push(diagnostic(
+                key,
+                if runtime {
+                    "runtime_reference_unchecked"
+                } else {
+                    "bundle_reference_unchecked"
+                },
+                "reference preserved; its target and value are unchecked outside a bundle",
+                Severity::Warning,
+            ));
+            if matches!(found.as_slice(), [reference] if reference.start == 0 && reference.end == raw.len())
+            {
+                continue;
+            }
         }
         let Ok(expression) = pattern(definition) else {
             continue;
         };
-        let Some(captures) = expression.captures(raw) else {
-            issues.push(diagnostic(
-                key,
-                "pattern_violation",
-                format!("value does not match {}", definition.value_pattern),
-                Severity::Error,
-            ));
+        let checked = if found.is_empty() {
+            raw.to_string()
+        } else {
+            without_references(raw, &REFERENCE_SENTINEL.to_string()).unwrap_or_default()
+        };
+        let Some(captures) = expression.captures(&checked) else {
+            issues.push(if found.is_empty() {
+                diagnostic(
+                    key,
+                    "pattern_violation",
+                    format!("value does not match {}", definition.value_pattern),
+                    Severity::Error,
+                )
+            } else {
+                diagnostic(
+                    key,
+                    "reference_pattern_unchecked",
+                    format!(
+                        "literal text around references does not match {}; the referenced value may supply the rest",
+                        definition.value_pattern
+                    ),
+                    Severity::Incomplete,
+                )
+            });
             continue;
         };
         let captured: Vec<_> = captures
@@ -646,11 +869,14 @@ fn validate_value(
             .map(|capture| capture.as_str())
             .collect();
         let tokens = if captured.is_empty() {
-            vec![*raw]
+            vec![checked.as_str()]
         } else {
             captured
         };
         for token in tokens {
+            if token.contains(REFERENCE_SENTINEL) {
+                continue;
+            }
             let numeric = if definition.unit.is_empty() {
                 token
             } else {

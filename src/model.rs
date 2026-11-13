@@ -143,6 +143,13 @@ pub struct ComposeRequest {
     pub params: BTreeMap<String, Value>,
     #[serde(default)]
     pub criteria: CriteriaInput,
+    /// Whole-section `*V:Section#` references emitted before named parameters.
+    /// Line tools cannot read the section, so its keys are unchecked.
+    #[serde(default)]
+    pub param_sections: Vec<String>,
+    /// Whole-section `*V:Section#` references emitted before named criteria.
+    #[serde(default)]
+    pub criteria_sections: Vec<String>,
     pub timeout: u64,
     #[serde(default)]
     pub pass_path: Option<String>,

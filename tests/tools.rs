@@ -168,6 +168,8 @@ fn wifi_request() -> ComposeRequest {
             "POWER".into(),
             Value::Single("5dB".into()),
         )])),
+        param_sections: vec![],
+        criteria_sections: vec![],
         timeout: 20000,
         pass_path: Some("NEXT".into()),
         fail_path: Some("FAIL".into()),
@@ -217,6 +219,8 @@ fn compose_raw_payload_preserves_shell_characters_and_emits_five_fields() -> Res
             Value::Single("DUT@echo a=b&next".into()),
         )]),
         criteria: CriteriaInput::Raw("root#".into()),
+        param_sections: vec![],
+        criteria_sections: vec![],
         timeout: 5000,
         pass_path: None,
         fail_path: None,
@@ -397,6 +401,178 @@ fn engine_references_are_preserved_without_runtime_resolution() -> Result<()> {
         .params
         .insert("ANT".into(), Value::Multiple(vec!["*I:".into()]));
     assert!(fixture().compose_line(invalid).is_err());
+    Ok(())
+}
+
+fn ssh_request(payload: &str, prompt: &str) -> ComposeRequest {
+    ComposeRequest {
+        device: "SSH".into(),
+        function: "OPEN".into(),
+        device_scope: None,
+        params: BTreeMap::from([("SESSION_PAYLOAD".into(), Value::Single(payload.into()))]),
+        criteria: CriteriaInput::Raw(prompt.into()),
+        param_sections: vec![],
+        criteria_sections: vec![],
+        timeout: 5000,
+        pass_path: None,
+        fail_path: None,
+        error_code: None,
+    }
+}
+
+#[test]
+fn bundle_references_are_preserved_in_line_tools() -> Result<()> {
+    let mut request = wifi_request();
+    request
+        .params
+        .insert("ANT".into(), Value::Multiple(vec!["*V:2G-ANT#".into()]));
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "POWER".into(),
+        Value::Single("*V:*V:Macro-Criteria_BAND#_LIMIT-POWER#".into()),
+    )]));
+    let result = fixture().compose_line(request)?;
+    assert_eq!(
+        result.line,
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=*V:2G-ANT#|POWER=*V:*V:Macro-Criteria_BAND#_LIMIT-POWER#|20000|NEXT|FAIL|"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "bundle_reference_unchecked")
+    );
+    assert_eq!(
+        fixture().validate_line(&result.line, None)?.status,
+        ValidationStatus::Valid
+    );
+    let line = fixture()
+        .compose_line(ssh_request("DUT@ls *.txt", "*V:Setting-PROMPT#"))?
+        .line;
+    assert_eq!(line, "SSH|OPEN|DUT@ls *.txt|*V:Setting-PROMPT#|5000");
+    for (line, status) in [
+        (
+            "SSH|OPEN|DUT@ls *.txt|*V:Setting-PROMPT#|5000",
+            ValidationStatus::Valid,
+        ),
+        (
+            "SSH|OPEN|DUT@echo|*V:Setting-PROMPT|5000",
+            ValidationStatus::Invalid,
+        ),
+        (
+            "SSH|OPEN|DUT@echo|*X:Setting-PROMPT#|5000",
+            ValidationStatus::Invalid,
+        ),
+        (
+            "SSH|OPEN|DUT@echo|*V:*X:A#-B#|5000",
+            ValidationStatus::Invalid,
+        ),
+        (
+            "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=*V:#|20000|NEXT|FAIL|",
+            ValidationStatus::Invalid,
+        ),
+    ] {
+        assert_eq!(
+            fixture().validate_line(line, None)?.status,
+            status,
+            "{line}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn whole_section_references_compose_and_validate() -> Result<()> {
+    let mut request = wifi_request();
+    request.params.clear();
+    request.param_sections = vec!["*V:2G_TX_SETTING#".into()];
+    request.criteria_sections = vec!["*V:LIMITS#".into()];
+    let result = fixture().compose_line(request)?;
+    assert_eq!(
+        result.line,
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|*V:2G_TX_SETTING#|*V:LIMITS#&POWER=5dB|20000|NEXT|FAIL|"
+    );
+    for code in ["section_reference_unchecked", "required_from_section"] {
+        assert!(
+            result.warnings.iter().any(|issue| issue.code == code),
+            "{code}"
+        );
+    }
+    let report = fixture().validate_line(&result.line, None)?;
+    assert_eq!(report.status, ValidationStatus::Incomplete);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|issue| issue.code == "section_reference_unresolved")
+    );
+    let report = fixture().validate_line(
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|*V:Setting#&*V:*V:Macro-Param_BAND#_SET#&ANT=15,2|POWER=5dB|20000|NEXT|FAIL|",
+        None,
+    )?;
+    assert_eq!(
+        report.status,
+        ValidationStatus::Valid,
+        "{:?}",
+        report.diagnostics
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|issue| issue.code == "section_reference_unchecked")
+    );
+    for bad in [
+        "*V:2G-ANT#",
+        "*E:Settings#",
+        "ANT=15",
+        "*V:A#&*V:B#",
+        "*V:A",
+    ] {
+        let mut request = wifi_request();
+        request.param_sections = vec![bad.into()];
+        assert!(fixture().compose_line(request).is_err(), "{bad}");
+    }
+    let mut raw = ssh_request("DUT@echo", "root#");
+    raw.param_sections = vec!["*V:Setting#".into()];
+    assert!(fixture().compose_line(raw).is_err());
+    Ok(())
+}
+
+#[test]
+fn embedded_references_keep_literal_pattern_checks() -> Result<()> {
+    for (line, status) in [
+        (
+            "SSH|OPEN|LOAD_SH@*V:Setting-SRCNIC_IP#:0|root#|5000",
+            ValidationStatus::Valid,
+        ),
+        (
+            "SSH|OPEN|*V:Setting-SESSION#@reboot|root#|5000",
+            ValidationStatus::Valid,
+        ),
+        (
+            "SSH|OPEN|LOAD_SH*V:Setting-SRCNIC_IP#|root#|5000",
+            ValidationStatus::Incomplete,
+        ),
+        (
+            "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=*V:Lim-P#dB|20000|NEXT|FAIL|",
+            ValidationStatus::Valid,
+        ),
+        (
+            "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=*V:Lim-P#mV|20000|NEXT|FAIL|",
+            ValidationStatus::Incomplete,
+        ),
+        (
+            "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,*V:Ant-Extra#|POWER=5dB|20000|NEXT|FAIL|",
+            ValidationStatus::Valid,
+        ),
+        (
+            "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=999,*V:Ant-Extra#|POWER=5dB|20000|NEXT|FAIL|",
+            ValidationStatus::Invalid,
+        ),
+    ] {
+        let report = fixture().validate_line(line, None)?;
+        assert_eq!(report.status, status, "{line}: {:?}", report.diagnostics);
+    }
     Ok(())
 }
 
@@ -6693,16 +6869,10 @@ async fn bundle_reference_uncertainty_is_located_bounded_and_never_borrows_runti
             "REFERENCE_AMBIGUOUS",
         ),
         (
-            "*V:Settings-Channel#",
-            "[Settings]\nChannel=*V:Other-Channel#\n[Other]\nChannel=6115\n",
-            "incomplete",
-            "REFERENCE_INDIRECT_UNSUPPORTED",
-        ),
-        (
             "*V:Settings-*V:Macro-Param_KEY##",
             "[Settings]\nChannel=6115\n",
             "incomplete",
-            "REFERENCE_NESTED_UNSUPPORTED",
+            "MACRO_ARGUMENT_UNBOUND",
         ),
         (
             "*E:Settings-Channel#",
@@ -6819,6 +6989,100 @@ async fn bundle_reference_uncertainty_is_located_bounded_and_never_borrows_runti
                 .any(|issue| issue["code"] == "RUNTIME_WRITER_UNCHECKED")
         }));
     }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn bundle_nested_and_indirect_references_resolve_within_limits() -> Result<()> {
+    let base = "[Settings]\nChannel=*V:Other-Channel#\nBand=2G\n[Other]\nChannel=6115\n[2G_LIMIT]\nPOWER=18\n[Gold]\nName=GOLDEN\n[GOLDEN]\nX=1\n";
+    for (value, extra, status, resolved, code) in [
+        ("*V:Settings-Channel#", "", "valid", Some("6115"), None),
+        (
+            "*V:*V:Settings-Band#_LIMIT-POWER#",
+            "",
+            "valid",
+            Some("18"),
+            None,
+        ),
+        (
+            "*V:Loop-A#",
+            "[Loop]\nA=*V:Loop-B#\nB=*V:Loop-A#\n",
+            "incomplete",
+            None,
+            Some("REFERENCE_LIMIT"),
+        ),
+        (
+            "*V:*V:Settings-Band#_MISSING-POWER#",
+            "",
+            "invalid",
+            None,
+            Some("REFERENCE_SECTION_MISSING"),
+        ),
+        (
+            "*V:*V:Gold-Name#-X#",
+            "",
+            "incomplete",
+            None,
+            Some("RUNTIME_VALUE_UNCHECKED"),
+        ),
+    ] {
+        let text = format!(
+            "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nWRITE=\"Test Program|SFIS_TO_VAR|GOLDEN|NULL|1|NEXT|FAIL\"\nA=\"DLL|F|{value}|NULL|1|QUIT|FAIL\"\n{base}{extra}"
+        );
+        let report = bundle_report(bundle_arguments(&text)).await?;
+        assert_eq!(report["layers"]["references"], status, "{value}: {report}");
+        let rows = report["execution"]
+            .as_array()
+            .ok_or_else(|| script_audit_mcp::Error::Knowledge("execution missing".into()))?;
+        let row = rows
+            .iter()
+            .find(|row| row["row"] == "A")
+            .ok_or_else(|| script_audit_mcp::Error::Knowledge("row A missing".into()))?;
+        if let Some(resolved) = resolved {
+            assert_eq!(row["parameters"], resolved, "{value}: {report}");
+            assert_ne!(row["references"], "unknown", "{value}: {report}");
+        }
+        if let Some(code) = code {
+            assert!(
+                report["diagnostics"]
+                    .as_array()
+                    .is_some_and(|issues| issues.iter().any(|issue| issue["code"] == code)),
+                "{value}: {report}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn bundle_record_writer_with_unresolved_parameters_masks_only_its_target() -> Result<()> {
+    let text = concat!(
+        "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
+        "WRITE=\"DLLGoldenKV|RECORD_TESTRESULT|RECORD_TIMES=*E:Run-Count#|NULL|1|NEXT|FAIL\"\n",
+        "READ=\"DLL|F|*V:Other-Channel#|NULL|1|NEXT|FAIL\"\n",
+        "COUNT=\"DLL|F|*V:DLL_GoldenKV-RECORD_TIMES#|NULL|1|QUIT|FAIL\"\n",
+        "[Other]\nChannel=6115\n[DLL_GoldenKV]\nRECORD_TIMES=stale\n"
+    );
+    let report = bundle_report(bundle_arguments(text)).await?;
+    let rows = report["execution"]
+        .as_array()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("execution missing".into()))?;
+    let find = |name: &str| rows.iter().find(|row| row["row"] == name).cloned();
+    let read =
+        find("READ").ok_or_else(|| script_audit_mcp::Error::Knowledge("READ missing".into()))?;
+    assert_eq!(read["parameters"], "6115", "{report}");
+    assert_ne!(read["references"], "unknown", "{report}");
+    let count =
+        find("COUNT").ok_or_else(|| script_audit_mcp::Error::Knowledge("COUNT missing".into()))?;
+    assert_eq!(count["references"], "unknown", "{report}");
+    assert_ne!(count["parameters"], "stale");
+    assert!(!report["diagnostics"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue["code"] == "RUNTIME_WRITER_UNCHECKED")
+    }));
     Ok(())
 }
 

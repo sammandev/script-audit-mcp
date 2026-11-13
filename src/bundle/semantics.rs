@@ -12,6 +12,7 @@ use super::{BundleDiagnostic, MAX_EXPANDED_ROWS, ValidateBundleRequest};
 pub const MAX_REFERENCE_STEPS: usize = 65_536;
 pub const MAX_RESOLVED_BYTES: usize = 32_768;
 pub const MAX_TOTAL_RESOLVED_BYTES: usize = 4_194_304;
+pub const MAX_REFERENCE_DEPTH: usize = 16;
 pub const MAX_EXECUTION_EDGES: usize = 65_536;
 pub const MAX_CYCLE_STEPS: usize = 65_536;
 
@@ -124,6 +125,7 @@ pub(super) fn analyze(
             diagnostics,
             steps: 0,
             bytes: 0,
+            depth: 0,
             bindings: None,
             runtime_keys,
             runtime_writes_unknown: false,
@@ -813,6 +815,7 @@ struct Resolver<'a, 'b> {
     diagnostics: &'b mut Vec<BundleDiagnostic>,
     steps: usize,
     bytes: usize,
+    depth: usize,
     dynamic: HashSet<String>,
     runtime_sections: HashSet<String>,
     runtime_keys: HashMap<String, HashSet<String>>,
@@ -840,6 +843,27 @@ impl Resolver<'_, '_> {
                         self.resolve(&row.dll_name, section, row, "device");
                     let (parameters, parameters_known) =
                         self.resolve(&row.criteria, section, row, "parameters");
+                    let record_target = device
+                        .split('#')
+                        .next()
+                        .and_then(|name| name.trim().strip_prefix("DLL"))
+                        .map(|name| name.trim_start_matches('_'))
+                        .filter(|name| !name.is_empty())
+                        .map(|name| format!("dll_{name}").to_ascii_lowercase());
+                    if function_known
+                        && device_known
+                        && !parameters_known
+                        && function.eq_ignore_ascii_case("RECORD_TESTRESULT")
+                    {
+                        // RECORD_TESTRESULT only writes DLL_<name>-RECORD_TIMES, so mask that key alone.
+                        if let Some(target) = record_target {
+                            self.runtime_keys
+                                .entry(target)
+                                .or_default()
+                                .insert("record_times".into());
+                        }
+                        continue;
+                    }
                     if !function_known || !parameters_known || !device_known {
                         self.runtime_writes_unknown = true;
                         unknown_writer.get_or_insert_with(|| {
@@ -865,18 +889,12 @@ impl Resolver<'_, '_> {
                         entry
                             .split_once('=')
                             .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("RECORD_TIMES"))
-                    }) && let Some(name) = device
-                        .split('#')
-                        .next()
-                        .and_then(|name| name.trim().strip_prefix("DLL"))
+                    }) && let Some(target) = record_target
                     {
-                        let name = name.trim_start_matches('_');
-                        if !name.is_empty() {
-                            self.runtime_keys
-                                .entry(format!("dll_{name}").to_ascii_lowercase())
-                                .or_default()
-                                .insert("record_times".into());
-                        }
+                        self.runtime_keys
+                            .entry(target)
+                            .or_default()
+                            .insert("record_times".into());
                     }
                 }
             }
@@ -932,19 +950,51 @@ impl Resolver<'_, '_> {
                 self.issue(site, field, "REFERENCE_LIMIT", true);
                 return (value.into(), false);
             }
-            let Some(end) = rest.find('#') else {
-                self.issue(site, field, "REFERENCE_MALFORMED", false);
+            let Some(end) = reference_end(rest) else {
+                let nested = rest
+                    .find('#')
+                    .and_then(|first| rest.get(3..first))
+                    .is_some_and(|spec| spec.contains('*'));
+                if nested {
+                    self.issue(site, field, "REFERENCE_NESTED_UNSUPPORTED", true);
+                } else {
+                    self.issue(site, field, "REFERENCE_MALFORMED", false);
+                }
                 return (value.into(), false);
             };
             let token = &rest[..=end];
-            let Some(spec) = rest.get(3..end) else {
+            let Some(raw_spec) = rest.get(3..end) else {
                 self.issue(site, field, "REFERENCE_MALFORMED", false);
                 return (value.into(), false);
             };
+            let spec = if !has_reference(raw_spec) {
+                Some(raw_spec.to_string())
+            } else if !rest.starts_with("*V:") {
+                let code = if ["*E:", "*I:", "*T:"]
+                    .iter()
+                    .any(|prefix| rest.starts_with(prefix))
+                {
+                    "RUNTIME_REFERENCE_UNCHECKED"
+                } else {
+                    "REFERENCE_PREFIX_UNSUPPORTED"
+                };
+                self.issue(site, field, code, true);
+                None
+            } else {
+                self.resolve_nested(raw_spec, site, field)
+            };
+            let Some(spec) = spec else {
+                output.push_str(token);
+                complete = false;
+                rest = &rest[end + 1..];
+                continue;
+            };
+            let spec = spec.as_str();
             if spec.contains('*') {
                 self.issue(site, field, "REFERENCE_NESTED_UNSUPPORTED", true);
                 return (value.into(), false);
             }
+            let resolved_token = format!("{}{spec}#", &rest[..3]).to_ascii_lowercase();
             let replacement = if spec.trim().is_empty()
                 || spec
                     .split_once('-')
@@ -952,7 +1002,7 @@ impl Resolver<'_, '_> {
             {
                 self.issue(site, field, "REFERENCE_MALFORMED", false);
                 None
-            } else if self.dynamic.contains(&token.to_ascii_lowercase())
+            } else if self.dynamic.contains(&resolved_token)
                 || self.runtime_sections.contains(
                     &spec
                         .split_once('-')
@@ -1111,10 +1161,47 @@ impl Resolver<'_, '_> {
                 .join("&")
         };
         if has_reference(&value) {
-            self.issue(site, field, "REFERENCE_INDIRECT_UNSUPPORTED", true);
-            None
+            self.resolve_nested(&value, site, field)
         } else {
             Some(value)
         }
     }
+
+    fn resolve_nested(
+        &mut self,
+        value: &str,
+        site: ReferenceSite<'_>,
+        field: &str,
+    ) -> Option<String> {
+        if self.depth >= MAX_REFERENCE_DEPTH {
+            self.issue(site, field, "REFERENCE_LIMIT", true);
+            return None;
+        }
+        self.depth += 1;
+        let (resolved, complete) = self.resolve_at(value, site, field);
+        self.depth -= 1;
+        complete.then_some(resolved)
+    }
+}
+
+/// Byte index of the `#` closing the reference opened at `rest[0..3]`, counting nested openers.
+fn reference_end(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    let mut depth = 1usize;
+    let mut index = 3;
+    while index < bytes.len() {
+        if bytes[index] == b'*' && bytes.get(index + 2) == Some(&b':') {
+            depth += 1;
+            index += 3;
+            continue;
+        }
+        if bytes[index] == b'#' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
 }
