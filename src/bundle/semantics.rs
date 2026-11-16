@@ -132,13 +132,17 @@ pub(super) fn analyze(
             sensitive_tokens: secrets
                 .iter()
                 .flat_map(|secret| {
-                    secret.match_indices('*').filter_map(|(start, _)| {
-                        let tail = &secret[start..];
-                        if reference_start(tail) != Some(0) {
-                            return None;
-                        }
-                        tail.find('#').map(|end| tail[..=end].to_string())
-                    })
+                    let mut tokens = Vec::new();
+                    let mut rest = secret.as_str();
+                    while let Some(start) = reference_start(rest) {
+                        rest = &rest[start..];
+                        let Some(end) = reference_end(rest) else {
+                            break;
+                        };
+                        tokens.push(rest[..=end].to_string());
+                        rest = &rest[end + 1..];
+                    }
+                    tokens
                 })
                 .collect(),
             resolved_secrets: HashSet::new(),

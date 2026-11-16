@@ -527,6 +527,10 @@ fn whole_section_references_compose_and_validate() -> Result<()> {
         "ANT=15",
         "*V:A#&*V:B#",
         "*V:A",
+        "*V:A|NULL|1|QUIT|FAIL\r\nEVIL=\"x#",
+        "*V:A\n#",
+        "*V:A=B#",
+        "*V:A&B#",
     ] {
         let mut request = wifi_request();
         request.param_sections = vec![bad.into()];
@@ -5493,6 +5497,30 @@ async fn plan_redacts_secrets_discovered_through_static_aliases() -> Result<()> 
     if let Some(files) = arguments["bundle"]["files"].as_array_mut() {
         files.push(json!({"name":"Settings.ini","text":"[Settings]\nKey=resolved-fixture-secret\nPASSWORD=*V:Settings-Key#\n"}));
     }
+    arguments["plan"]["requirements"][0]["provenance"][0]["excerpt"] =
+        json!("review note resolved-fixture-secret");
+    let mut report = plan_report(arguments).await?;
+    report["validation"] = serde_json::Value::Null;
+    assert!(
+        !report.to_string().contains("resolved-fixture-secret"),
+        "{report}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn plan_redacts_secrets_resolved_through_nested_references() -> Result<()> {
+    use serde_json::json;
+    let mut arguments = tx_plan_arguments();
+    if let Some(files) = arguments["bundle"]["files"].as_array_mut() {
+        files.push(json!({"name":"Settings.ini","text":"[Settings]\nKey=resolved-fixture-secret\nSel=Key\n"}));
+    }
+    replace_plan_script(
+        &mut arguments,
+        "[RUN]\n",
+        "[RUN]\nLOGIN=\"SSH|OPEN|PASSWORD=*V:Settings-*V:Settings-Sel##|root#|1|OFDM6|FAIL\"\n",
+    );
     arguments["plan"]["requirements"][0]["provenance"][0]["excerpt"] =
         json!("review note resolved-fixture-secret");
     let mut report = plan_report(arguments).await?;

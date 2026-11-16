@@ -724,6 +724,9 @@ fn without_references(raw: &str, replacement: &str) -> Option<String> {
 
 /// True for one `*V:Header#` token naming a whole data section (no top-level `-key`).
 pub(crate) fn is_section_reference(raw: &str) -> bool {
+    if raw.contains(['|', '&', '=', '"']) || raw.chars().any(char::is_control) {
+        return false;
+    }
     let Ok(found) = references(raw) else {
         return false;
     };
