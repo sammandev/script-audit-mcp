@@ -5693,12 +5693,30 @@ async fn plan_excludes_comments_dead_rows_and_separates_additional_cases() -> Re
     let report = plan_report(arguments).await?;
     assert_eq!(report["coverage"][0]["status"], "matched", "{report}");
     assert_eq!(report["additional"][0]["row"], "EXTRA");
+    for prefix in [";", "//", ";//", "  ;", "\t//"] {
+        let mut arguments = tx_plan_arguments();
+        replace_plan_script(&mut arguments, "OFDM6=", &format!("{prefix}OFDM6="));
+        let report = plan_report(arguments).await?;
+        assert_eq!(
+            report["coverage"][0]["status"], "missing",
+            "{prefix:?}: {report}"
+        );
+        assert_eq!(report["coverage"][0]["evidence"], json!([]), "{prefix:?}");
+        assert_eq!(report["mandatory"]["matched"], 0, "{prefix:?}");
+        assert_eq!(report["ready_for_review"], false, "{prefix:?}");
+    }
+    // A single '/' is not a comment: the tester runs the row, so audit must not drop it.
     let mut arguments = tx_plan_arguments();
-    replace_plan_script(&mut arguments, "OFDM6=", ";OFDM6=");
+    replace_plan_script(&mut arguments, "OFDM6=", "/OFDM6=");
     let report = plan_report(arguments).await?;
-    assert_eq!(report["coverage"][0]["status"], "missing");
+    assert_eq!(report["coverage"][0]["status"], "unknown", "{report}");
+    assert_eq!(report["coverage"][0]["evidence"][0]["row"], "/OFDM6");
     assert_eq!(report["mandatory"]["matched"], 0);
     assert_eq!(report["ready_for_review"], false);
+    assert_eq!(
+        report["validation"]["diagnostics"][0]["code"],
+        "INVALID_COMMENT_PREFIX"
+    );
     Ok(())
 }
 
