@@ -69,4 +69,29 @@ if (replace_binary /approved/missing-binary); then
     fail "Install failure did not stop replacement."
 fi
 echo 'PASS: install failure prevents rename'
+
+SS_CALLS="$(mktemp)"
+sudo() {
+    if [[ "$1" == systemctl ]]; then
+        return 0
+    elif [[ "$1" == ss ]]; then
+        # The first inspection happens before MCP has bound its private port.
+        if [[ -s "$SS_CALLS" ]]; then
+            printf 'LISTEN 0 128 127.0.0.1:39065 0.0.0.0:* users:(("script-audit-mc",pid=1,fd=6))\n'
+        fi
+        echo call >>"$SS_CALLS"
+        printf 'LISTEN 0 511 10.176.2.139:39064 0.0.0.0:* users:(("nginx",pid=2,fd=9),("nginx",pid=3,fd=9))\n'
+    else
+        return 1
+    fi
+}
+bash() { echo '[ OK ] mocked smoke check'; }
+sleep() { :; }
+output="$(verify_release 2>&1)"
+rm -f -- "$SS_CALLS"
+unset -f bash sleep
+[[ "$output" == *'Attempt 1/10: listeners are not ready yet; retrying in 2 seconds.'* ]]
+[[ "$output" != *'[FAIL]'* && "$output" != *ERROR* ]]
+[[ "$output" == *'nginx (2 processes)'* && "$output" == *'mocked smoke check'* ]]
+echo 'PASS: transient listener startup is reported as a retry, not a failure'
 echo 'All shell helper tests passed.'

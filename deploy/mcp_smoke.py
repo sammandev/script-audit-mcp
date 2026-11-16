@@ -94,6 +94,7 @@ class Client:
 
 
 def check(client: Client, tool: str | None, arguments: dict[str, Any]) -> None:
+    print(f"[INFO] Target: {client.url}")
     try:
         initialized = rpc_result(client.post({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -106,6 +107,12 @@ def check(client: Client, tool: str | None, arguments: dict[str, Any]) -> None:
         if not isinstance(protocol, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", protocol):
             raise ValueError("Missing or invalid negotiated protocol version.")
         client.protocol = protocol
+        server = initialized.get("serverInfo")
+        server_label = (
+            f"{server.get('name', 'unknown')} {server.get('version', '')}".strip()
+            if isinstance(server, dict) else "unknown server"
+        )
+        print(f"[ OK ] Session initialized: protocol {protocol}, {server_label}.")
         capabilities = initialized.get("capabilities")
         if not isinstance(capabilities, dict) or not isinstance(capabilities.get("tools"), dict):
             raise ValueError("Initialization did not advertise tools.")
@@ -122,7 +129,8 @@ def check(client: Client, tool: str | None, arguments: dict[str, Any]) -> None:
         names = {item["name"] for item in tools}
         if names != EXPECTED_TOOLS or len(tools) != len(EXPECTED_TOOLS):
             raise ValueError("Tool discovery does not match the eight expected tools.")
-        print(f"MCP initialization and all eight tools passed (protocol {client.protocol}).")
+        print(f"[ OK ] Tool discovery: all {len(EXPECTED_TOOLS)} expected tools are present.")
+        print(f"       {', '.join(sorted(names))}")
         if tool:
             result = rpc_result(client.post({
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -130,12 +138,14 @@ def check(client: Client, tool: str | None, arguments: dict[str, Any]) -> None:
             }, 200), 3)
             if result.get("isError") is True or not isinstance(result.get("content"), list):
                 raise ValueError(f"Tool {tool} failed or returned an invalid result.")
+            print(f"[ OK ] Tool call {tool} succeeded:")
             print(json.dumps(result, indent=2))
         for header in ("Origin: http://untrusted.invalid", "Host: untrusted.invalid"):
             status, _, _ = client.request("GET", extra_headers=(header,))
+            name = header.split(':', 1)[0]
             if status != 403:
-                raise ValueError(f"Proxy rejection failed for {header.split(':', 1)[0]}: HTTP {status}.")
-        print("Proxy rejected untrusted Origin and Host with HTTP 403.")
+                raise ValueError(f"Proxy rejection failed for {name}: HTTP {status}.")
+            print(f"[ OK ] Proxy rejected an untrusted {name} header (HTTP 403).")
     finally:
         if client.session:
             pending_error = sys.exc_info()[0] is not None
@@ -143,6 +153,8 @@ def check(client: Client, tool: str | None, arguments: dict[str, Any]) -> None:
                 status, _, _ = client.request("DELETE")
                 if status not in (200, 202, 204):
                     raise ValueError(f"MCP session cleanup failed: HTTP {status}.")
+                if not pending_error:
+                    print(f"[ OK ] Smoke session closed (HTTP {status}).")
             except (ValueError, OSError, subprocess.SubprocessError):
                 if not pending_error:
                     raise

@@ -426,6 +426,16 @@ and fail on MCP tool errors, but do not certify validation semantics, draft
 approval, or hardware behavior. Review tool results locally before sharing;
 debug logs may contain connection details and must be redacted.
 
+Task output comes from `deploy/ui.sh`. Each task prints a banner (host,
+operator, source directory, git revision), numbered `[n/N]` steps, aligned
+details, status tags (`[ OK ]`, `[INFO]`, `[WARN]`, `[FAIL]`), and a final
+`RESULT` block with the elapsed time. Check the banner's git revision to confirm
+the uploaded source is the intended release. A verification attempt that fails
+while the service is still starting is shown as an `[INFO]` retry, not an error;
+only the final attempt reports `[FAIL]`. On failure, the summary names the
+failed step and, after a backup exists, the exact rollback command. Colour is
+used only on a terminal; set `NO_COLOR=1` to disable it.
+
 After passing automation, reconnect clients, check known catalog content,
 retest the changed behavior, confirm the existing web application still works,
 and verify LAN/VPN-only exposure. Passing local protocol checks does not prove

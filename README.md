@@ -513,7 +513,11 @@ fields, `references` (`resolved` or `unknown`), and `reachability` (`reachable`,
 `unreachable`, or `unknown`). `execution_edges` link these IDs or `terminal:<token>`
 and retain edge kind and certainty. Reachable means a possible path under the
 supported static graph, never a guaranteed measurement or successful execution.
-Commented rows are absent. Unsupported routing/dispatch and omitted macro bodies
+Commented rows are absent. A comment is a line whose first non-blank characters
+are `;` or `//` (so `;//` also works). A line starting with a single `/` is not a
+comment: it is reported as `INVALID_COMMENT_PREFIX` (or `FLOW_ROW_INVALID` inside a
+TEST FLOW section). `validate_line` reports a commented line as `commented_line`
+instead of checking it as a function. Unsupported routing/dispatch and omitted macro bodies
 produce unknown evidence. Source-recovery errors or truncated graph analysis make
 reachability unknown rather than claiming execution coverage.
 
@@ -631,7 +635,7 @@ The composition request contains:
 
 - `comparison`: the existing sourced plan and bundle request, including explicit
   flow selection, Device scope, runtime bindings and sensitive values.
-- `flow_anchor`: one complete semicolon-comment line, including its newline,
+- `flow_anchor`: one complete comment line (`;` or `//`), including its newline,
   occurring exactly once directly inside the selected TEST FLOW section.
 - `station_settings`: references with `role`, `file`, `section`, and `key`.
   Require a uniquely resolved, nonempty setting for each role: `equipment`,

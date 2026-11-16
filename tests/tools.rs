@@ -202,6 +202,25 @@ fn validate_line_checks_eight_fields_without_losing_trailing_empty_field() -> Re
 }
 
 #[test]
+fn validate_line_reports_commented_lines_instead_of_unknown_functions() -> Result<()> {
+    for line in [
+        ";DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=5dB|20000|NEXT|FAIL|",
+        "  // DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=5dB|20000|NEXT|FAIL|",
+        ";//DLLWIFI_TEST|TX_MULTI_VERIFICATION",
+    ] {
+        let report = fixture().validate_line(line, None)?;
+        assert_eq!(report.status, ValidationStatus::Invalid, "{line}");
+        let codes: Vec<_> = report
+            .diagnostics
+            .iter()
+            .map(|issue| issue.code.as_str())
+            .collect();
+        assert_eq!(codes, ["commented_line"], "{line}");
+    }
+    Ok(())
+}
+
+#[test]
 fn catalog_reports_audited_composition_support() -> Result<()> {
     let functions = fixture().list_functions(Some("DLLWIFI_TEST"))?;
     assert!(functions[0].composition_supported);
@@ -7623,6 +7642,59 @@ async fn bundle_checks_selected_flow_local_labels_and_exact_tokens() -> Result<(
     let mut missing = bundle_arguments(text);
     missing["selected_flow"] = "[TEST FLOW:Unknown]".into();
     assert_eq!(bundle_report(missing).await?["status"], "invalid");
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn bundle_reports_single_slash_rows_as_invalid_comments() -> Result<()> {
+    let text = concat!(
+        "[TEST FLOW:Normal]\nRUN = \"RUN\"\n/OLD = \"RUN\"\n[RUN]\n",
+        "// SKIP = \"DLL|F|NULL|NULL|1|QUIT|FAIL\"\n",
+        "/DEAD = \"DLL|F|NULL|NULL|1|QUIT|FAIL\"\n",
+        "A = \"DLL|F|NULL|NULL|1|QUIT|FAIL\"\n"
+    );
+    let report = bundle_report(bundle_arguments(text)).await?;
+    assert_eq!(report["layers"]["structure"], "invalid", "{report}");
+    let issues = report["diagnostics"]
+        .as_array()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("missing diagnostics".into()))?;
+    let prefixes: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue["code"] == "INVALID_COMMENT_PREFIX")
+        .collect();
+    assert_eq!(prefixes.len(), 1, "{report}");
+    assert_eq!(prefixes[0]["line"], 6);
+    assert_eq!(prefixes[0]["section"], "RUN");
+    assert_eq!(prefixes[0]["row"], "/DEAD");
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue["code"] == "FLOW_ROW_INVALID" && issue["line"] == 3),
+        "{report}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn compose_accepts_double_slash_flow_anchor() -> Result<()> {
+    let mut arguments = reviewed_composition_arguments().await?;
+    let main = arguments["comparison"]["bundle"]["files"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .replace("; INSERT TX HERE", "// INSERT TX HERE");
+    arguments["comparison"]["bundle"]["files"][0]["text"] = main.into();
+    arguments["flow_anchor"] = "// INSERT TX HERE\r\n".into();
+    let arguments = bind_composition_review(arguments).await?;
+    let report = compose_report(arguments).await?;
+    assert_ne!(report["diffs"], serde_json::json!([]), "{report}");
+    assert!(
+        report["draft_files"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("// INSERT TX HERE\r\nTX_DRAFT_0")),
+        "{report}"
+    );
     Ok(())
 }
 

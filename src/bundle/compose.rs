@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use schemars::JsonSchema;
+use script_checker::parser::common::{is_comment, is_ignored_line};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -770,7 +771,7 @@ fn setting_value<'a>(files: &'a [BundleFile], setting: &StationReference) -> Opt
     let mut values = Vec::new();
     let mut sections = 0;
     for line in file.text.lines().map(str::trim) {
-        if line.starts_with([';', '#']) || line.is_empty() {
+        if is_ignored_line(line) || line.starts_with('#') {
             continue;
         }
         if let Some(section) = line
@@ -1157,10 +1158,7 @@ fn insert(
     procedure: &str,
     definitions: &str,
 ) -> bool {
-    if anchor.lines().count() != 1
-        || !anchor.trim_start().starts_with(';')
-        || !anchor.ends_with('\n')
-    {
+    if anchor.lines().count() != 1 || !is_comment(anchor) || !anchor.ends_with('\n') {
         return false;
     }
     if files.iter().any(|file| {

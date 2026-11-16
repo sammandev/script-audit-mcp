@@ -17,14 +17,17 @@ run_task() (
     DEPLOY_DIR="$TEST_DIR/.."
     PROJECT_DIR=/approved/source
     BACKUP_ROOT=/opt/script-audit-mcp/backups
+    BINARY=/opt/script-audit-mcp/bin/script-audit-mcp
     TRACE_FILE="$WORK/trace"
     : >"$TRACE_FILE"
 
     log() { printf '%s\n' "$*" >>"$TRACE_FILE"; }
+    source "$TEST_DIR/../ui.sh"
     fail() { echo "ERROR: $*" >&2; exit 1; }
     operator_only() { log operator; }
     require_commands() { :; }
     require_smoke_runtime() { :; }
+    describe_binary() { :; }
     check_installation() { log preflight; [[ "$scenario" != preflight-fails ]]; }
     lock_deployment() { log lock; }
     cleanup_staged() { log cleanup; }

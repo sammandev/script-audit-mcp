@@ -88,6 +88,15 @@ impl Engine {
     ) -> Result<ValidationReport> {
         let segments: Vec<String> = line.split('|').map(str::to_string).collect();
         let mut diagnostics = Vec::new();
+        if script_checker::parser::common::is_comment(line) {
+            diagnostics.push(grammar::diagnostic(
+                "line",
+                "commented_line",
+                "line is commented out with ';' or '//' and the tester skips it; remove the comment prefix to validate the row",
+                Severity::Error,
+            ));
+            return Ok(validation_report(segments, diagnostics));
+        }
         if line.contains(['\r', '\n']) {
             diagnostics.push(grammar::diagnostic(
                 "line",

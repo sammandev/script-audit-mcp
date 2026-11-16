@@ -612,6 +612,23 @@ fn validate_source_structure(
                 section = Some(header);
                 continue;
             }
+            if raw.trim_start().starts_with('/')
+                && !diagnostics.iter().any(|issue| {
+                    issue.file.as_deref() == Some(&file.name)
+                        && issue.line == Some(index + 1)
+                        && issue.code == "FLOW_ROW_INVALID"
+                })
+            {
+                let row = raw.split_once('=').map(|(label, _)| label.trim());
+                diagnostics.push(
+                    BundleDiagnostic::new(
+                        "structure",
+                        "INVALID_COMMENT_PREFIX",
+                        "A single '/' does not comment out a line; use ';' or '//', otherwise the tester treats it as an active row.",
+                    )
+                    .at(&file.name, index + 1, section.as_deref(), row),
+                );
+            }
             if raw.trim_start().starts_with('[') {
                 diagnostics.push(
                     BundleDiagnostic::new(

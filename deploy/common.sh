@@ -13,9 +13,21 @@ ENV_FILE="$INSTALL_DIR/etc/script-audit-mcp.env"
 UNIT=/etc/systemd/system/script-audit-mcp.service
 NGINX_SITE=/etc/nginx/sites-available/script-audit-mcp
 BACKUP_ROOT="$INSTALL_DIR/backups"
+PUBLIC_LISTENER=10.176.2.139:39064
+PRIVATE_LISTENER=127.0.0.1:39065
+# shellcheck source=deploy/ui.sh
+source "$DEPLOY_DIR/ui.sh"
 
 fail() {
-    printf 'ERROR: %s\n' "$*" >&2
+    error "$*"
+    # Inside a multi-step task, close with the same summary an ERR trap prints.
+    if ((UI_STEPS > 0)); then
+        if [[ -n "${BACKUP:-}" ]]; then
+            detail Backup "$BACKUP" >&2
+            hint "Restore if needed: bash deploy/rollback.sh $BACKUP"
+        fi
+        result FAILED "Stopped during step $UI_STEP/$UI_STEPS: ${UI_STEP_TITLE:-startup}." >&2
+    fi
     exit 1
 }
 
@@ -36,6 +48,7 @@ operator_only() {
     [[ "$EUID" -ne 0 ]] || fail "Run as your ordinary operator account, not sudo bash. The script invokes sudo when needed."
     require_commands sudo systemctl
     sudo -v
+    ok "Running as operator $(id -un) on $(uname -n); sudo session is ready."
 }
 
 check_installation() {
@@ -56,6 +69,20 @@ check_installation() {
     sudo test ! -L "$BINARY"
     sudo test -f "$ENV_FILE"
     sudo test -f "$NGINX_SITE"
+    ok "Installation matches the approved unit, account, listener and file layout."
+    detail Unit "$UNIT"
+    detail Binary "$BINARY"
+    detail Environment "$ENV_FILE"
+    detail "Nginx site" "$NGINX_SITE"
+}
+
+# Usage: describe_binary LABEL PATH
+describe_binary() {
+    local checksum metadata
+    checksum="$(sudo sha256sum -- "$2" | awk '{print $1}')"
+    metadata="$(sudo stat -c '%s bytes, modified %y' -- "$2" | sed 's/\.[0-9]* / /')"
+    detail "$1" "sha256 $checksum"
+    detail '' "$metadata"
 }
 
 lock_deployment() {
@@ -63,6 +90,7 @@ lock_deployment() {
     # Keep all operators using the same uploaded source directory.
     exec 9>"$PROJECT_DIR/.deploy.lock"
     flock -n 9 || fail "Another update or rollback is running from this source directory."
+    ok "Deployment lock acquired ($PROJECT_DIR/.deploy.lock)."
 }
 
 make_backup() {
@@ -75,7 +103,13 @@ make_backup() {
     if sudo test -d "$UNIT.d"; then
         sudo cp -a -- "$UNIT.d" "$BACKUP/script-audit-mcp.service.d"
     fi
-    printf 'Rollback backup: %s\n' "$BACKUP"
+    ok "Rollback backup created."
+    detail Backup "$BACKUP"
+    if sudo test -d "$UNIT.d"; then
+        detail Contains 'binary, unit, environment file, Nginx site, unit drop-ins'
+    else
+        detail Contains 'binary, unit, environment file, Nginx site'
+    fi
 }
 
 replace_binary() {
@@ -93,39 +127,71 @@ cleanup_staged() {
 }
 
 verify_release() {
-    local attempt
+    local attempt reason listeners='' smoke=''
     for attempt in {1..10}; do
-        if sudo systemctl is-active --quiet "$SERVICE" &&
-            check_listeners &&
-            bash "$DEPLOY_DIR/mcp-smoke.sh"; then
-            printf 'Protocol checks passed. Reconnect clients and verify known catalog content, changed behavior, and the existing web app.\n'
+        if ! sudo systemctl is-active --quiet "$SERVICE"; then
+            reason='service is not active yet'
+        elif ! listeners="$(check_listeners 2>&1)"; then
+            reason='listeners are not ready yet'
+        elif ! smoke="$(bash "$DEPLOY_DIR/mcp-smoke.sh" 2>&1)"; then
+            reason='MCP protocol smoke check failed'
+        else
+            ok "Service is active (verification attempt $attempt/10)."
+            printf '%s\n' "$listeners"
+            printf '%s\n' "$smoke" | sed 's/^/  /'
             return 0
         fi
-        printf 'Verification attempt %s/10 failed; retrying in 2 seconds.\n' "$attempt" >&2
-        sleep 2
+        if ((attempt < 10)); then
+            # Restarts take a moment; early attempts are expected to wait.
+            info "Attempt $attempt/10: $reason; retrying in 2 seconds."
+            sleep 2
+        fi
     done
-    fail "Release verification failed. Review current logs with debug.sh and use the printed backup with rollback.sh."
+    error "Attempt 10/10: $reason."
+    [[ -z "$listeners" ]] || printf '%s\n' "$listeners" >&2
+    [[ -z "$smoke" ]] || printf '%s\n' "$smoke" | sed 's/^/  /' >&2
+    fail "Release verification failed. Review logs with debug.sh and use the printed backup with rollback.sh."
 }
 
 check_listeners() {
     local listeners
     listeners="$(sudo ss -H -ltnp '( sport = :39064 or sport = :39065 )')" || {
-        printf 'ERROR: Cannot inspect MCP listeners.\n' >&2
+        error 'Cannot inspect MCP listeners.'
         return 1
     }
-    printf '%s\n' "$listeners"
-    if ! printf '%s\n' "$listeners" | awk '
+    if [[ -z "$listeners" ]]; then
+        info 'No process is listening on port 39064 or 39065.'
+    else
+        printf '       %-24s %s\n' 'Listener' 'Process'
+        printf '%s\n' "$listeners" | awk '{
+            line = $0; name = ""; count = 0
+            while (match(line, /\("[^"]+",pid=[0-9]+/)) {
+                entry = substr(line, RSTART + 2, RLENGTH - 2)
+                split(entry, parts, "\",pid=")
+                if (name == "") { name = parts[1]; pid = parts[2] }
+                count++
+                line = substr(line, RSTART + RLENGTH)
+            }
+            if (name == "") summary = "(unknown process)"
+            else if (count == 1) summary = sprintf("%s (pid %s)", name, pid)
+            else summary = sprintf("%s (%d processes)", name, count)
+            printf "       %-24s %s\n", $4, summary
+        }'
+    fi
+    if ! printf '%s\n' "$listeners" | awk -v private="$PRIVATE_LISTENER" -v public="$PUBLIC_LISTENER" '
         $4 ~ /:39065$/ {
             private_count++
-            if ($4 != "127.0.0.1:39065" || $0 !~ /script-audit-mc/) bad=1
+            if ($4 != private || $0 !~ /script-audit-mc/) bad=1
         }
         $4 ~ /:39064$/ {
             public_count++
-            if ($4 != "10.176.2.139:39064" || $0 !~ /nginx/) bad=1
+            if ($4 != public || $0 !~ /nginx/) bad=1
         }
         END { exit (bad || private_count != 1 || public_count != 1) ? 1 : 0 }
     '; then
-        printf 'ERROR: Listener addresses or process names do not match the approved MCP/Nginx deployment.\n' >&2
+        error 'Listener addresses or process names do not match the approved MCP/Nginx deployment.'
+        hint "Expected exactly: $PRIVATE_LISTENER -> script-audit-mcp, $PUBLIC_LISTENER -> nginx."
         return 1
     fi
+    ok "Listeners match the approved deployment ($PRIVATE_LISTENER private, $PUBLIC_LISTENER via Nginx)."
 }
