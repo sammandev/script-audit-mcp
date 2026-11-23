@@ -220,6 +220,12 @@ fn empty_device_scope_is_invalid_input() -> Result<()> {
                 .any(|issue| issue.code == "invalid_input"
                     && issue.message.contains("invalid device_scope"))
         );
+        let issue = report
+            .diagnostics
+            .iter()
+            .find(|issue| issue.code == "invalid_input")
+            .ok_or_else(|| script_audit_mcp::Error::Knowledge("missing invalid_input".into()))?;
+        assert_eq!(issue.field, "device_scope");
     }
     Ok(())
 }
