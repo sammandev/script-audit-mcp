@@ -8,7 +8,7 @@ pub mod postgres;
 #[cfg(feature = "legacy-sqlite")]
 pub mod sqlite;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use model::{
     ComposeRequest, ComposeResult, CriteriaInput, CriteriaSuggestions, Definition, Diagnostic,
@@ -282,6 +282,14 @@ impl Engine {
         device_scope: Option<&str>,
     ) -> Result<FunctionSchema> {
         let function = self.resolve_function(device, name)?;
+        self.function_schema(function, device_scope)
+    }
+
+    fn function_schema(
+        &self,
+        function: &Function,
+        device_scope: Option<&str>,
+    ) -> Result<FunctionSchema> {
         let scope = device_scope
             .unwrap_or(&function.interface)
             .to_ascii_uppercase();
@@ -365,6 +373,17 @@ impl Engine {
 
     pub fn list_functions(&self, device: Option<&str>) -> Result<Vec<Function>> {
         let target = device.map(device_target).transpose()?;
+        let mut lookup = HashMap::with_capacity(self.snapshot.functions.len());
+        for function in &self.snapshot.functions {
+            lookup
+                .entry(function_lookup_key(
+                    &function.source,
+                    &function.interface,
+                    &function.name,
+                ))
+                .and_modify(|unique| *unique = None)
+                .or_insert(Some(function));
+        }
         let mut functions: Vec<_> = self
             .snapshot
             .functions
@@ -381,9 +400,17 @@ impl Engine {
                 } else {
                     function.interface.clone()
                 };
-                function.composition_supported = self
-                    .get_function(&device, &function.name, None)
-                    .is_ok_and(|schema| schema.function.composition_supported);
+                function.composition_supported = device_target(&device)
+                    .ok()
+                    .and_then(|(source, interface)| {
+                        lookup
+                            .get(&function_lookup_key(source, interface, &function.name))
+                            .copied()
+                            .flatten()
+                    })
+                    .filter(|resolved| grammar::profile(resolved).is_some())
+                    .and_then(|resolved| self.function_schema(resolved, None).ok())
+                    .is_some_and(|schema| schema.function.composition_supported);
                 function
             })
             .collect();
@@ -396,6 +423,18 @@ impl Engine {
         });
         Ok(functions)
     }
+}
+
+fn function_lookup_key<'a>(
+    source: &'a str,
+    interface: &str,
+    name: &str,
+) -> (&'a str, String, String) {
+    (
+        source,
+        interface.to_ascii_uppercase(),
+        name.to_ascii_uppercase(),
+    )
 }
 
 pub(crate) fn device_target(device: &str) -> Result<(&str, &str)> {
