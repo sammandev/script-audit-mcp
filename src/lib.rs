@@ -154,7 +154,7 @@ impl Engine {
                         false,
                         &mut diagnostics,
                     );
-                    if segments[3] != "NULL" && !segments[3].is_empty() {
+                    if segments[3] != grammar::NULL_CRITERION && !segments[3].is_empty() {
                         grammar::parse_fields(
                             &grammar::split_section_references(&segments[3]).0,
                             &[],
@@ -217,7 +217,7 @@ impl Engine {
                 false,
                 &mut diagnostics,
             );
-            request.criteria = if segments[3] == "NULL" || segments[3].is_empty() {
+            request.criteria = if segments[3] == grammar::NULL_CRITERION || segments[3].is_empty() {
                 CriteriaInput::default()
             } else if !named {
                 CriteriaInput::Raw(segments[3].clone())
