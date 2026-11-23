@@ -61,6 +61,11 @@ pub type Result<Value> = std::result::Result<Value, Error>;
 
 pub trait Catalog: Send + Sync {
     fn snapshot(&self) -> Result<Snapshot>;
+
+    /// A snapshot holding at least every row `Engine::get_function(device, name, _)` reads.
+    fn function_snapshot(&self, _device: &str, _name: &str) -> Result<Snapshot> {
+        self.snapshot()
+    }
 }
 
 pub struct Engine {
@@ -393,7 +398,7 @@ impl Engine {
     }
 }
 
-fn device_target(device: &str) -> Result<(&str, &str)> {
+pub(crate) fn device_target(device: &str) -> Result<(&str, &str)> {
     if device.is_empty() || device.trim() != device || device.contains(['|', '\r', '\n']) {
         return Err(Error::InvalidInput {
             field: "device".into(),
