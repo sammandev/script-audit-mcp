@@ -8,6 +8,8 @@ use crate::model::{
 };
 use crate::{Error, Result};
 
+pub(crate) const NULL_CRITERION: &str = "NULL";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Encoding {
     Raw,
@@ -478,14 +480,12 @@ pub(crate) fn compose(schema: &FunctionSchema, request: &ComposeRequest) -> Resu
         }
         (CriteriaInput::Raw(value), Some(Encoding::Raw)) => {
             if let Some(field) = schema.criteria.first() {
-                emit_fields(
-                    &schema.criteria,
-                    &BTreeMap::from([(field.name.clone(), Value::Single(value.clone()))]),
-                    Encoding::Raw,
-                    true,
-                    &mut issues,
-                )
-            } else if value.is_empty() || value == "NULL" {
+                let mut values = BTreeMap::new();
+                if value != NULL_CRITERION {
+                    values.insert(field.name.clone(), Value::Single(value.clone()));
+                }
+                emit_fields(&schema.criteria, &values, Encoding::Raw, true, &mut issues)
+            } else if value.is_empty() || value == NULL_CRITERION {
                 String::new()
             } else {
                 issues.push(diagnostic(
@@ -519,7 +519,7 @@ pub(crate) fn compose(schema: &FunctionSchema, request: &ComposeRequest) -> Resu
         schema.function.name.clone(),
         parameters,
         if criteria.is_empty() {
-            "NULL".into()
+            NULL_CRITERION.into()
         } else {
             criteria
         },

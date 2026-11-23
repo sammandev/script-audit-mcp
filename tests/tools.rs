@@ -440,6 +440,34 @@ fn ssh_request(payload: &str, prompt: &str) -> ComposeRequest {
 }
 
 #[test]
+fn compose_line_rejects_null_for_required_raw_criterion() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    for link in &mut snapshot.criteria_links {
+        if link.device_name == "SSH" {
+            link.required = true;
+        }
+    }
+    let engine = Engine::new(snapshot);
+    let mut request = ssh_request("DUT@echo", "NULL");
+    request.timeout = 1;
+    let report = engine.validate_line("SSH|OPEN|DUT@echo|NULL|1", None)?;
+    assert_eq!(report.status, ValidationStatus::Invalid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|issue| issue.field == "criteria.EXPECTED_RESPONSE" && issue.code == "required")
+    );
+
+    let result = engine.compose_line(request);
+    assert!(
+        matches!(&result, Err(script_audit_mcp::Error::Validation(issues)) if issues.iter().any(|issue| issue.field == "criteria.EXPECTED_RESPONSE" && issue.code == "required")),
+        "expected a required criterion error from compose_line: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn bundle_references_are_preserved_in_line_tools() -> Result<()> {
     let mut request = wifi_request();
     request
