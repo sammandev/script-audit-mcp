@@ -211,7 +211,13 @@ impl McpServer {
         operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         self.invoke_on(
-            move |catalog| catalog.function_snapshot(&device, &name),
+            move |catalog| {
+                if crate::device_target(&device).is_err() {
+                    // Keep the Engine's response, including validate_line's diagnostic report.
+                    return Ok(Snapshot::default());
+                }
+                catalog.function_snapshot(&device, &name)
+            },
             operation,
         )
         .await
@@ -242,5 +248,85 @@ impl McpServer {
                 })))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct UnavailableCatalog;
+
+    impl Catalog for UnavailableCatalog {
+        fn snapshot(&self) -> EngineResult<Snapshot> {
+            Err(Error::Knowledge("catalog must not be loaded".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_device_point_lookups_skip_catalog() -> std::result::Result<(), ErrorData> {
+        let server = McpServer::new(Arc::new(UnavailableCatalog));
+        let device = "DLLIOT#INVALID";
+        let function = "READ";
+        let message = "invalid device: only DLL #QUICK and #PROXY mode suffixes are supported";
+        let compose = ComposeRequest {
+            device: device.into(),
+            function: function.into(),
+            device_scope: None,
+            params: Default::default(),
+            criteria: Default::default(),
+            param_sections: Vec::new(),
+            criteria_sections: Vec::new(),
+            timeout: 1,
+            pass_path: None,
+            fail_path: None,
+            error_code: None,
+        };
+        let results = [
+            server
+                .get_function(Parameters(GetFunctionRequest {
+                    device: device.into(),
+                    name: function.into(),
+                    device_scope: None,
+                }))
+                .await?,
+            server
+                .suggest_criteria(Parameters(SuggestCriteriaRequest {
+                    device: device.into(),
+                    function: function.into(),
+                    device_scope: None,
+                }))
+                .await?,
+            server.compose_line(Parameters(compose)).await?,
+        ];
+        let expected = Some(json!({ "error": {
+            "code": "invalid_input", "message": message, "diagnostics": []
+        }}));
+        for result in results {
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.structured_content, expected);
+        }
+
+        let result = server
+            .validate_line(Parameters(ValidateLineRequest {
+                line: format!("{device}|{function}||NULL|1"),
+                device_scope: None,
+            }))
+            .await?;
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content,
+            Some(json!({
+                "status": "invalid",
+                "segments": [device, function, "", "NULL", "1"],
+                "diagnostics": [
+                    { "field": "function", "code": "unsupported_convention",
+                      "message": "function convention is missing or unsupported", "severity": "incomplete" },
+                    { "field": "function", "code": "invalid_input", "message": message, "severity": "error" }
+                ]
+            }))
+        );
+        Ok(())
     }
 }
