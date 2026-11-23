@@ -182,8 +182,12 @@ impl Engine {
                     Error::UnknownFunction(_) => ("unknown_function", Severity::Error),
                     _ => ("invalid_input", Severity::Error),
                 };
+                let field = match &error {
+                    Error::InvalidInput { field, .. } if field == "device_scope" => field.as_str(),
+                    _ => "function",
+                };
                 diagnostics.push(grammar::diagnostic(
-                    "function",
+                    field,
                     code,
                     error.to_string(),
                     severity,
