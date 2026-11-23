@@ -147,7 +147,7 @@ pub fn compose(mut request: ComposeBundleRequest, engine: &Engine) -> Result<Val
     if let Value::Object(tables) = &mut catalog {
         for table in tables.values_mut() {
             if let Value::Array(rows) = table {
-                rows.sort_by_key(Value::to_string);
+                rows.sort_by_cached_key(Value::to_string);
             }
         }
     }
