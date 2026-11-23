@@ -63,10 +63,18 @@ impl McpServer {
         &self,
         Parameters(request): Parameters<ListFunctionsRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        self.invoke(move |engine| {
+        let device = request.device.clone();
+        let list = move |engine: Engine| {
             let functions = engine.list_functions(request.device.as_deref())?;
             Ok(serde_json::json!({"functions": functions}))
-        })
+        };
+        self.invoke_on(
+            move |catalog| match device.as_deref() {
+                Some(device) => catalog.device_snapshot(device),
+                None => catalog.snapshot(),
+            },
+            list,
+        )
         .await
     }
 
@@ -262,6 +270,44 @@ mod tests {
         fn snapshot(&self) -> EngineResult<Snapshot> {
             Err(Error::Knowledge("catalog must not be loaded".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn list_functions_uses_device_snapshot_only_with_a_filter()
+    -> std::result::Result<(), ErrorData> {
+        struct ScopedCatalog;
+
+        impl Catalog for ScopedCatalog {
+            fn snapshot(&self) -> EngineResult<Snapshot> {
+                Ok(Snapshot::default())
+            }
+
+            fn device_snapshot(&self, device: &str) -> EngineResult<Snapshot> {
+                assert_eq!(device, "ssh");
+                Err(Error::Knowledge("scoped catalog was loaded".into()))
+            }
+        }
+
+        let server = McpServer::new(Arc::new(ScopedCatalog));
+        let broad = server
+            .list_functions(Parameters(ListFunctionsRequest { device: None }))
+            .await?;
+        assert_eq!(broad.structured_content, Some(json!({"functions": []})));
+        let filtered = server
+            .list_functions(Parameters(ListFunctionsRequest {
+                device: Some("ssh".into()),
+            }))
+            .await?;
+        assert_eq!(filtered.is_error, Some(true));
+        assert_eq!(
+            filtered.structured_content,
+            Some(json!({"error": {
+                "code": "knowledge_error",
+                "message": Error::Knowledge("scoped catalog was loaded".into()).to_string(),
+                "diagnostics": []
+            }})),
+        );
+        Ok(())
     }
 
     #[tokio::test]

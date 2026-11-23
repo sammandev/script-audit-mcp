@@ -62,6 +62,11 @@ pub type Result<Value> = std::result::Result<Value, Error>;
 pub trait Catalog: Send + Sync {
     fn snapshot(&self) -> Result<Snapshot>;
 
+    /// A snapshot holding the rows needed by `Engine::list_functions(Some(device))`.
+    fn device_snapshot(&self, _device: &str) -> Result<Snapshot> {
+        self.snapshot()
+    }
+
     /// A snapshot holding at least every row `Engine::get_function(device, name, _)` reads.
     fn function_snapshot(&self, _device: &str, _name: &str) -> Result<Snapshot> {
         self.snapshot()
