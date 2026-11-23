@@ -8039,13 +8039,18 @@ async fn bundle_tools_reject_macro_expansion_before_reading_catalog() -> Result<
         .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
     let mut comparison = tx_plan_arguments();
     comparison["bundle"] = arguments;
+    let mut composition = compose_bundle_arguments();
+    composition["comparison"] = comparison.clone();
     let compare = serde_json::from_value(comparison)
         .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
-    let (validation, comparison) = tokio::join!(
+    let compose = serde_json::from_value(composition)
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    let (validation, comparison, composition) = tokio::join!(
         server.validate_ini_bundle(rmcp::handler::server::wrapper::Parameters(validate)),
         server.compare_plan_to_bundle(rmcp::handler::server::wrapper::Parameters(compare)),
+        server.compose_ini_bundle(rmcp::handler::server::wrapper::Parameters(compose)),
     );
-    for outcome in [validation, comparison] {
+    for outcome in [validation, comparison, composition] {
         let outcome =
             outcome.map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
         assert_eq!(outcome.is_error, Some(true));

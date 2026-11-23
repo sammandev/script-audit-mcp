@@ -192,13 +192,15 @@ impl McpServer {
         &self,
         Parameters(request): Parameters<crate::bundle::compose::ComposeBundleRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        if let Err(error) = request.check_bounds() {
-            return Ok(CallToolResult::structured_error(serde_json::json!({
-                "error": { "code": error.code(), "message": error.to_string(), "diagnostics": [] }
-            })));
-        }
-        self.invoke(move |engine| crate::bundle::compose::compose(request, &engine))
-            .await
+        let request = match request.prepare() {
+            Ok(request) => request,
+            Err(error) => {
+                return Ok(CallToolResult::structured_error(serde_json::json!({
+                    "error": { "code": error.code(), "message": error.to_string(), "diagnostics": [] }
+                })));
+            }
+        };
+        self.invoke(move |engine| request.compose(&engine)).await
     }
 }
 

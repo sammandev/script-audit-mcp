@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use schemars::JsonSchema;
-use script_checker::parser::common::{is_comment, is_ignored_line};
+use script_checker::{
+    analysis::ParsedContentAnalysis,
+    parser::common::{is_comment, is_ignored_line},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -111,7 +114,19 @@ pub enum SettingRole {
 
 impl ComposeBundleRequest {
     pub fn check_bounds(&self) -> Result<()> {
-        self.comparison.check_bounds()?;
+        self.parse_bounded().map(|_| ())
+    }
+
+    pub(crate) fn prepare(self) -> Result<CheckedComposition> {
+        let parsed = self.parse_bounded()?;
+        Ok(CheckedComposition {
+            request: self,
+            parsed,
+        })
+    }
+
+    fn parse_bounded(&self) -> Result<Option<ParsedContentAnalysis>> {
+        let parsed = self.comparison.parse_bounded()?;
         if serde_json::to_vec(self)
             .map_err(|_| invalid_request("composition cannot be represented"))?
             .len()
@@ -135,12 +150,31 @@ impl ComposeBundleRequest {
                 "composition exceeds 1048576 serialized bytes, 64 settings/corrections, 128 template questions, 8192 template bytes or 512 anchor bytes",
             ));
         }
-        Ok(())
+        Ok(parsed)
     }
 }
 
-pub fn compose(mut request: ComposeBundleRequest, engine: &Engine) -> Result<Value> {
-    request.check_bounds()?;
+/// A composition request whose bounds passed, with the base bundle parse they produced.
+pub(crate) struct CheckedComposition {
+    request: ComposeBundleRequest,
+    parsed: Option<ParsedContentAnalysis>,
+}
+
+pub fn compose(request: ComposeBundleRequest, engine: &Engine) -> Result<Value> {
+    request.prepare()?.compose(engine)
+}
+
+impl CheckedComposition {
+    pub(crate) fn compose(self, engine: &Engine) -> Result<Value> {
+        compose_checked(self, engine)
+    }
+}
+
+fn compose_checked(checked: CheckedComposition, engine: &Engine) -> Result<Value> {
+    let CheckedComposition {
+        mut request,
+        mut parsed,
+    } = checked;
     let original = request.comparison.bundle.files.clone();
     let mut catalog = serde_json::to_value(&engine.snapshot)
         .map_err(|_| invalid_request("catalog identity cannot be represented"))?;
@@ -423,7 +457,7 @@ pub fn compose(mut request: ComposeBundleRequest, engine: &Engine) -> Result<Val
                 .replace("{{section}}", &section)
                 .replace("{{parameters}}", &parameters)
                 .replace("{{criteria}}", &criteria);
-            if !insert(
+            let candidate_parsed = if insert(
                 &mut candidate.files,
                 &candidate.selected_flow,
                 &request.flow_anchor,
@@ -431,18 +465,23 @@ pub fn compose(mut request: ComposeBundleRequest, engine: &Engine) -> Result<Val
                 &section,
                 &procedure,
                 &definitions,
-            ) || (ComparePlanRequest {
-                bundle: candidate.clone(),
-                plan: request.comparison.plan.clone(),
-                flow_variant: request.comparison.flow_variant,
-            })
-            .check_bounds()
-            .is_err()
-            {
+            ) {
+                (ComparePlanRequest {
+                    bundle: candidate.clone(),
+                    plan: request.comparison.plan.clone(),
+                    flow_variant: request.comparison.flow_variant,
+                })
+                .parse_bounded()
+                .ok()
+            } else {
+                None
+            };
+            let Some(candidate_parsed) = candidate_parsed else {
                 blockers.push(format!("{}: composition needs a unique selected-flow comment anchor, collision-free section and available output/source-record budget.", requirement.id));
                 continue;
-            }
+            };
             request.comparison.bundle = candidate;
+            parsed = candidate_parsed;
             inserted += 1;
             for key in definitions
                 .lines()
@@ -465,8 +504,11 @@ pub fn compose(mut request: ComposeBundleRequest, engine: &Engine) -> Result<Val
         .filter(|setting| setting.role == SettingRole::Credential)
         .filter_map(|setting| setting_value(&original, setting).map(str::to_string))
         .collect();
-    let (mut comparison, mut secrets) =
-        plan::compare_with_secrets(request.comparison, engine, &declared_secrets)?;
+    let (mut comparison, mut secrets) = plan::compare_checked(
+        request.comparison.into_checked(parsed),
+        engine,
+        &declared_secrets,
+    )?;
     let sampling_policy = comparison["sampling_policy"].clone();
     secrets.extend(super::diagnostic_secrets(&super::ValidateBundleRequest {
         files: original.clone(),

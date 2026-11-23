@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use schemars::JsonSchema;
+use script_checker::analysis::ParsedContentAnalysis;
 use serde::{Deserialize, Serialize};
 
 use crate::{Engine, Result};
@@ -268,21 +269,30 @@ pub struct PlanReport {
 
 impl ComparePlanRequest {
     pub fn check_bounds(&self) -> Result<()> {
-        self.bundle.check_bounds()?;
-        self.check_plan_bounds()
+        self.parse_bounded().map(|_| ())
     }
 
     pub(crate) fn prepare(self) -> Result<CheckedComparison> {
+        let parsed = self.parse_bounded()?;
+        Ok(self.into_checked(parsed))
+    }
+
+    pub(super) fn parse_bounded(&self) -> Result<Option<ParsedContentAnalysis>> {
         let parsed = self.bundle.parse_bounded()?;
         self.check_plan_bounds()?;
-        Ok(CheckedComparison {
+        Ok(parsed)
+    }
+
+    /// `parsed` must be this request's own `parse_bounded` result.
+    pub(super) fn into_checked(self, parsed: Option<ParsedContentAnalysis>) -> CheckedComparison {
+        CheckedComparison {
             bundle: super::CheckedBundle {
                 request: self.bundle,
                 parsed,
             },
             plan: self.plan,
             flow_variant: self.flow_variant,
-        })
+        }
     }
 
     fn check_plan_bounds(&self) -> Result<()> {
@@ -418,15 +428,7 @@ pub fn compare(request: ComparePlanRequest, engine: &Engine) -> Result<serde_jso
     request.prepare()?.compare(engine)
 }
 
-pub(super) fn compare_with_secrets(
-    request: ComparePlanRequest,
-    engine: &Engine,
-    declared_secrets: &[String],
-) -> Result<(serde_json::Value, Vec<String>)> {
-    compare_checked(request.prepare()?, engine, declared_secrets)
-}
-
-fn compare_checked(
+pub(super) fn compare_checked(
     request: CheckedComparison,
     engine: &Engine,
     declared_secrets: &[String],
