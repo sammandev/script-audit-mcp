@@ -110,7 +110,7 @@ impl Engine {
                 Severity::Error,
             ));
         }
-        if !matches!(segments.len(), 5 | 7 | 8 | 9) {
+        if !is_supported_line_width(segments.len()) {
             diagnostics.push(grammar::diagnostic(
                 "line",
                 "field_count",
@@ -546,6 +546,10 @@ fn select_fields(
         ))
     });
     Ok(fields)
+}
+
+pub(crate) fn is_supported_line_width(field_count: usize) -> bool {
+    matches!(field_count, 5 | 7 | 8 | 9)
 }
 
 fn validation_report(segments: Vec<String>, diagnostics: Vec<Diagnostic>) -> ValidationReport {
