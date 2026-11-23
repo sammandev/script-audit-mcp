@@ -126,6 +126,56 @@ fn list_functions_filters_script_device_and_exposes_convention() -> Result<()> {
 }
 
 #[test]
+fn list_functions_preserves_script_device_resolution_for_support() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions.extend([
+        Function {
+            interface: "ssh".into(),
+            name: "open".into(),
+            ..snapshot.functions[0].clone()
+        },
+        Function {
+            interface: "WIFI_TEST#QUICK".into(),
+            name: "tx_multi_verification".into(),
+            ..snapshot.functions[1].clone()
+        },
+        Function {
+            interface: "WIFI_TEST#INVALID".into(),
+            ..snapshot.functions[1].clone()
+        },
+    ]);
+    let engine = Engine::new(snapshot);
+    let listed = engine
+        .list_functions(None)?
+        .into_iter()
+        .map(|row| (row.interface, row.name, row.composition_supported))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        [
+            ("SSH".into(), "OPEN".into(), false),
+            ("ssh".into(), "open".into(), false),
+            ("WIFI_TEST".into(), "TX_MULTI_VERIFICATION".into(), true),
+            (
+                "WIFI_TEST#INVALID".into(),
+                "TX_MULTI_VERIFICATION".into(),
+                false
+            ),
+            (
+                "WIFI_TEST#QUICK".into(),
+                "tx_multi_verification".into(),
+                true
+            ),
+        ]
+    );
+    let filtered = engine.list_functions(Some("DLLwifi_test#PROXY"))?;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].interface, "WIFI_TEST");
+    assert!(filtered[0].composition_supported);
+    Ok(())
+}
+
+#[test]
 fn get_function_resolves_scoped_schema_and_preserves_examples() -> Result<()> {
     let schema = fixture().get_function("DLLWIFI_TEST#QUICK", "TX_MULTI_VERIFICATION", None)?;
     assert_eq!(schema.device_scope, "WIFI_TEST");
