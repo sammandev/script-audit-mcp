@@ -2,15 +2,11 @@ use std::collections::HashSet;
 
 use schemars::JsonSchema;
 use script_checker::{
-    analysis::{ContentAnalysisRequest, SourceFile, analyze_contents},
+    analysis::{ContentAnalysisRequest, ParsedContentAnalysis, SourceFile, parse_contents},
     models::{FlowKind, ScriptSection},
-    parser::{
-        common::{
-            canonical_header, is_ignored_line, label_without_retry, parse_any_section,
-            parse_flow_section, section_name,
-        },
-        main_flow::parse_main_flow_text,
-        script_sections::parse_script_sections_text,
+    parser::common::{
+        canonical_header, is_ignored_line, label_without_retry, parse_any_section,
+        parse_flow_section, section_name,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -176,6 +172,18 @@ fn invalid_request(message: &str) -> Error {
 
 impl ValidateBundleRequest {
     pub fn check_bounds(&self) -> Result<()> {
+        self.parse_bounded().map(|_| ())
+    }
+
+    pub(crate) fn prepare(self) -> Result<CheckedBundle> {
+        let parsed = self.parse_bounded()?;
+        Ok(CheckedBundle {
+            request: self,
+            parsed,
+        })
+    }
+
+    fn parse_bounded(&self) -> Result<Option<ParsedContentAnalysis>> {
         if self.files.is_empty() || self.files.len() > 16 {
             return Err(invalid_request("supply between 1 and 16 logical files"));
         }
@@ -242,92 +250,98 @@ impl ValidateBundleRequest {
                 "bundle exceeds 1048576 text bytes or 4096 source records",
             ));
         }
-        if let Some(main) = self
+        let Some(main) = self
             .files
             .iter()
             .find(|file| file.name.eq_ignore_ascii_case("MAIN_FLOW.ini"))
-        {
-            let parsed = parse_script_sections_text(&main.text, &main.name);
-            let parsed_macros = self
+        else {
+            // Bounds checks permit a missing main file; validation reports it after the snapshot.
+            return Ok(None);
+        };
+        let macros = self
+            .files
+            .iter()
+            .find(|file| file.name.eq_ignore_ascii_case("MACRO_LIST.ini"));
+        let source = |file: &BundleFile| SourceFile {
+            name: file.name.clone(),
+            text: file.text.clone(),
+        };
+        let parsed = parse_contents(ContentAnalysisRequest {
+            main_flow: source(main),
+            macro_list: macros.map(source),
+            auxiliary_files: self
                 .files
                 .iter()
-                .find(|file| file.name.eq_ignore_ascii_case("MACRO_LIST.ini"))
-                .map(|file| parse_script_sections_text(&file.text, &file.name));
-            let flows = parse_main_flow_text(&main.text, &main.name);
-            let expanded_rows = flows
-                .flows
-                .iter()
-                .filter(|flow| {
-                    flow.kind == FlowKind::Test
-                        && canonical_header(&flow.header) == canonical_header(&self.selected_flow)
+                .filter(|file| {
+                    !file.name.eq_ignore_ascii_case("MAIN_FLOW.ini")
+                        && !file.name.eq_ignore_ascii_case("MACRO_LIST.ini")
                 })
-                .flat_map(|flow| &flow.items)
-                .filter_map(|item| parsed.section_by_name(item))
-                .flat_map(|section| &section.rows)
-                .map(|row| {
-                    let macro_rows = if row.dll_name.eq_ignore_ascii_case("MACRO") {
-                        parsed_macros
-                            .as_ref()
-                            .and_then(|macros| macros.section_by_name(&row.dll_function))
-                            .map_or(0, |section| section.rows.len())
-                    } else {
-                        0
-                    };
-                    macro_rows + 1
-                })
-                .sum::<usize>();
-            if expanded_rows > MAX_EXPANDED_ROWS {
-                return Err(invalid_request(
-                    "checker expansion estimate exceeds 16384 rows",
-                ));
-            }
+                .map(source)
+                .collect(),
+            required_files: Vec::new(),
+            flow_header: self.selected_flow.clone(),
+        })
+        .map_err(|_| invalid_request("checker could not analyze supplied contents"))?;
+        let selected_flow = canonical_header(&self.selected_flow);
+        let expanded_rows = parsed
+            .flows()
+            .iter()
+            .filter(|flow| {
+                flow.kind == FlowKind::Test && canonical_header(&flow.header) == selected_flow
+            })
+            .flat_map(|flow| &flow.items)
+            .filter_map(|item| parsed.main_sections().section_by_name(item))
+            .flat_map(|section| &section.rows)
+            .map(|row| {
+                let macro_rows = if row.dll_name.eq_ignore_ascii_case("MACRO") {
+                    parsed
+                        .macro_sections()
+                        .and_then(|macros| macros.section_by_name(&row.dll_function))
+                        .map_or(0, |section| section.rows.len())
+                } else {
+                    0
+                };
+                macro_rows + 1
+            })
+            .sum::<usize>();
+        if expanded_rows > MAX_EXPANDED_ROWS {
+            return Err(invalid_request(
+                "checker expansion estimate exceeds 16384 rows",
+            ));
         }
-        Ok(())
+        Ok(Some(parsed))
     }
 }
 
+pub(crate) struct CheckedBundle {
+    request: ValidateBundleRequest,
+    parsed: Option<ParsedContentAnalysis>,
+}
+
 pub fn validate(request: ValidateBundleRequest, engine: &Engine) -> Result<BundleReport> {
-    validate_with_secrets(request, engine, &[]).map(|(report, _)| report)
+    request.prepare()?.validate(engine)
+}
+
+impl CheckedBundle {
+    pub(crate) fn validate(self, engine: &Engine) -> Result<BundleReport> {
+        validate_with_secrets(self, engine, &[]).map(|(report, _)| report)
+    }
 }
 
 fn validate_with_secrets(
-    request: ValidateBundleRequest,
+    checked: CheckedBundle,
     engine: &Engine,
     declared_secrets: &[String],
 ) -> Result<(BundleReport, Vec<String>)> {
-    request.check_bounds()?;
-    let main = request
-        .files
-        .iter()
-        .find(|file| file.name.eq_ignore_ascii_case("MAIN_FLOW.ini"))
-        .ok_or_else(|| invalid_request("MAIN_FLOW.ini is required to select a flow"))?;
-    let macros = request
-        .files
-        .iter()
-        .find(|file| file.name.eq_ignore_ascii_case("MACRO_LIST.ini"));
-    let parsed = parse_script_sections_text(&main.text, &main.name);
-    let parsed_macros = macros.map(|file| parse_script_sections_text(&file.text, &file.name));
-    let flows = parse_main_flow_text(&main.text, &main.name);
-    let source = |file: &BundleFile| SourceFile {
-        name: file.name.clone(),
-        text: file.text.clone(),
-    };
-    let analysis = analyze_contents(ContentAnalysisRequest {
-        main_flow: source(main),
-        macro_list: macros.map(source),
-        auxiliary_files: request
-            .files
-            .iter()
-            .filter(|file| {
-                !file.name.eq_ignore_ascii_case("MAIN_FLOW.ini")
-                    && !file.name.eq_ignore_ascii_case("MACRO_LIST.ini")
-            })
-            .map(source)
-            .collect(),
-        required_files: Vec::new(),
-        flow_header: request.selected_flow.clone(),
-    })
-    .map_err(|_| invalid_request("checker could not analyze supplied contents"))?;
+    let CheckedBundle { request, parsed } = checked;
+    let parsed =
+        parsed.ok_or_else(|| invalid_request("MAIN_FLOW.ini is required to select a flow"))?;
+    let has_macros = parsed.macro_sections().is_some();
+    let main_section_count = parsed.main_sections().sections.len();
+    let analysis = parsed.analyze();
+    // The checker returns main first, followed by macros, then auxiliary sources.
+    let main = &analysis.source_files[0];
+    let (main_sections, macro_sections) = analysis.script_sections.split_at(main_section_count);
     let mut diagnostics = Vec::new();
     for issue in &analysis.diagnostics {
         if !matches!(
@@ -379,7 +393,7 @@ fn validate_with_secrets(
         });
     }
     validate_source_structure(&request.files, request.dialect, &mut diagnostics);
-    if let Some(selected) = flows.flows.iter().find(|flow| {
+    if let Some(selected) = analysis.flows.iter().find(|flow| {
         flow.kind == FlowKind::Test
             && canonical_header(&flow.header) == canonical_header(&request.selected_flow)
     }) {
@@ -394,7 +408,7 @@ fn validate_with_secrets(
             );
         }
         for item in &selected.rows {
-            if !parsed.sections.iter().any(|section| {
+            if !main_sections.iter().any(|section| {
                 section.name.eq_ignore_ascii_case(&item.item) && !section.rows.is_empty()
             }) {
                 diagnostics.push(
@@ -416,9 +430,7 @@ fn validate_with_secrets(
     }
     validate_rows(
         &analysis.script_sections,
-        parsed_macros
-            .as_ref()
-            .map(|parsed| parsed.sections.as_slice()),
+        has_macros.then_some(macro_sections),
         request.dialect,
         &mut diagnostics,
     );

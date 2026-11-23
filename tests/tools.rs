@@ -7905,6 +7905,54 @@ async fn bundle_returns_structured_errors_for_unanalyzable_requests() -> Result<
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn bundle_tools_reject_macro_expansion_before_reading_catalog() -> Result<()> {
+    struct UnreadCatalog;
+    impl script_audit_mcp::Catalog for UnreadCatalog {
+        fn snapshot(&self) -> Result<Snapshot> {
+            panic!("an over-budget bundle must not read the catalog");
+        }
+    }
+    let server = script_audit_mcp::mcp::McpServer::new(std::sync::Arc::new(UnreadCatalog));
+    let mut arguments = bundle_arguments(&format!(
+        "[TEST FLOW:Normal]\n{}[RUN]\nCALL = \"MACRO|READ|NULL|NULL|1|QUIT|FAIL\"\n",
+        "RUN = \"RUN\"\n".repeat(200)
+    ));
+    let macro_rows = (0..100)
+        .map(|index| format!("A{index} = \"DLL|F|NULL|NULL|1|QUIT|FAIL\"\n"))
+        .collect::<String>();
+    arguments["files"] = serde_json::json!([
+        arguments["files"][0].take(),
+        {
+            "name": "macro_list.INI",
+            "text": format!("[READ]\n{macro_rows}"),
+        }
+    ]);
+    let validate = serde_json::from_value(arguments.clone())
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    let mut comparison = tx_plan_arguments();
+    comparison["bundle"] = arguments;
+    let compare = serde_json::from_value(comparison)
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    let (validation, comparison) = tokio::join!(
+        server.validate_ini_bundle(rmcp::handler::server::wrapper::Parameters(validate)),
+        server.compare_plan_to_bundle(rmcp::handler::server::wrapper::Parameters(compare)),
+    );
+    for outcome in [validation, comparison] {
+        let outcome =
+            outcome.map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+        assert_eq!(outcome.is_error, Some(true));
+        assert!(outcome.structured_content.is_some_and(|body| {
+            body["error"]["code"] == "invalid_input"
+                && body["error"]["message"].as_str().is_some_and(|message| {
+                    message.contains("checker expansion estimate exceeds 16384 rows")
+                })
+        }));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_uses_one_snapshot_and_keeps_concurrent_requests_isolated() -> Result<()> {
     use std::sync::{
         Arc,

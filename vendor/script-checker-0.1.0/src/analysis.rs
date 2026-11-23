@@ -11,7 +11,7 @@ use crate::models::{
     ScriptRow, ScriptSection, VariableReference,
 };
 use crate::parser::common::{canonical_header, case_key, is_terminal_token, label_without_retry};
-use crate::parser::main_flow::parse_main_flow_text;
+use crate::parser::main_flow::{ParsedMainFlow, parse_main_flow_text};
 use crate::parser::script_sections::{
     ParsedScriptSections, parse_data_sections_text, parse_script_sections_text,
 };
@@ -37,6 +37,55 @@ pub struct ContentAnalysisRequest {
     pub auxiliary_files: Vec<SourceFile>,
     pub required_files: Vec<String>,
     pub flow_header: String,
+}
+
+struct ParsedScripts {
+    main_flow: ParsedMainFlow,
+    main_sections: ParsedScriptSections,
+    macro_sections: Option<ParsedScriptSections>,
+}
+
+impl ParsedScripts {
+    fn new(main: &SourceFile, macros: Option<&SourceFile>) -> Self {
+        Self {
+            main_flow: parse_main_flow_text(&main.text, &main.name),
+            main_sections: parse_script_sections_text(&main.text, &main.name),
+            macro_sections: macros
+                .map(|source| parse_script_sections_text(&source.text, &source.name)),
+        }
+    }
+}
+
+pub struct ParsedContentAnalysis {
+    request: ContentAnalysisRequest,
+    inputs: AnalysisInputs,
+    diagnostics: Vec<Diagnostic>,
+    scripts: ParsedScripts,
+}
+
+impl ParsedContentAnalysis {
+    pub fn flows(&self) -> &[Flow] {
+        &self.scripts.main_flow.flows
+    }
+
+    pub fn main_sections(&self) -> &ParsedScriptSections {
+        &self.scripts.main_sections
+    }
+
+    pub fn macro_sections(&self) -> Option<&ParsedScriptSections> {
+        self.scripts.macro_sections.as_ref()
+    }
+
+    pub fn analyze(self) -> AnalysisOutput {
+        analyze_loaded(
+            self.request.main_flow,
+            self.request.macro_list,
+            self.request.auxiliary_files,
+            self.inputs,
+            self.diagnostics,
+            self.scripts,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +136,9 @@ pub struct AnalysisOutput {
     pub variable_references: Vec<VariableReference>,
     pub diagnostics: Vec<Diagnostic>,
     pub graph: Option<ScriptFlowGraph>,
+    /// Main flow first, then the optional macro list, then auxiliary sources.
     pub source_files: Vec<SourceFile>,
+    /// Main flow sections followed by macro-list sections.
     pub script_sections: Vec<ScriptSection>,
 }
 
@@ -170,6 +221,7 @@ pub fn analyze(request: AnalysisRequest) -> Result<AnalysisOutput, String> {
     };
     let auxiliary_files =
         collect_ini_sources(&request, &main_flow_path, macro_list_path.as_deref())?;
+    let scripts = ParsedScripts::new(&main_flow, macro_list.as_ref());
     Ok(analyze_loaded(
         main_flow,
         macro_list,
@@ -181,10 +233,16 @@ pub fn analyze(request: AnalysisRequest) -> Result<AnalysisOutput, String> {
             flow_header: request.flow_header,
         },
         diagnostics,
+        scripts,
     ))
 }
 
 pub fn analyze_contents(request: ContentAnalysisRequest) -> Result<AnalysisOutput, String> {
+    Ok(parse_contents(request)?.analyze())
+}
+
+/// Parse the main flow and script sections without expanding the flow graph.
+pub fn parse_contents(request: ContentAnalysisRequest) -> Result<ParsedContentAnalysis, String> {
     if request.flow_header.trim().is_empty() {
         return Err("provide an explicit TEST FLOW header".to_string());
     }
@@ -219,15 +277,15 @@ pub fn analyze_contents(request: ContentAnalysisRequest) -> Result<AnalysisOutpu
             .macro_list
             .as_ref()
             .map(|source| source.name.clone()),
-        flow_header: Some(request.flow_header),
+        flow_header: Some(request.flow_header.clone()),
     };
-    Ok(analyze_loaded(
-        request.main_flow,
-        request.macro_list,
-        request.auxiliary_files,
+    let scripts = ParsedScripts::new(&request.main_flow, request.macro_list.as_ref());
+    Ok(ParsedContentAnalysis {
+        request,
         inputs,
         diagnostics,
-    ))
+        scripts,
+    })
 }
 
 fn analyze_loaded(
@@ -236,17 +294,19 @@ fn analyze_loaded(
     auxiliary_files: Vec<SourceFile>,
     mut inputs: AnalysisInputs,
     loading_diagnostics: Vec<Diagnostic>,
+    scripts: ParsedScripts,
 ) -> AnalysisOutput {
     let main_source_name = &main_flow.name;
-    let parsed_main = parse_main_flow_text(&main_flow.text, main_source_name);
-    let main_sections = parse_script_sections_text(&main_flow.text, main_source_name);
+    let ParsedScripts {
+        main_flow: parsed_main,
+        main_sections,
+        macro_sections,
+    } = scripts;
     let mut diagnostics = parsed_main.diagnostics;
     diagnostics.extend(main_sections.diagnostics.clone());
-    let macro_sections = macro_list.as_ref().map(|source| {
-        let parsed = parse_script_sections_text(&source.text, &source.name);
-        diagnostics.extend(parsed.diagnostics.clone());
-        parsed
-    });
+    if let Some(macros) = &macro_sections {
+        diagnostics.extend(macros.diagnostics.clone());
+    }
     diagnostics.extend(loading_diagnostics);
 
     validate_flows(
@@ -310,9 +370,9 @@ fn analyze_loaded(
     inputs.flow_header = selected_flow
         .map(|flow| flow.header.clone())
         .or(inputs.flow_header);
-    let mut script_sections = main_sections.sections.clone();
-    if let Some(macros) = &macro_sections {
-        script_sections.extend(macros.sections.clone());
+    let mut script_sections = main_sections.sections;
+    if let Some(macros) = macro_sections {
+        script_sections.extend(macros.sections);
     }
     let source_files = std::iter::once(main_flow)
         .chain(macro_list)
@@ -343,11 +403,7 @@ fn analyze_loaded(
                 .filter(|flow| flow.kind == FlowKind::Test)
                 .map(|flow| flow.items.len())
                 .sum(),
-            sections: main_sections.sections.len()
-                + macro_sections
-                    .as_ref()
-                    .map(|parsed| parsed.sections.len())
-                    .unwrap_or(0),
+            sections: script_sections.len(),
             nodes: graph.as_ref().map(|item| item.node_count).unwrap_or(0),
             edges: graph.as_ref().map(|item| item.edge_count).unwrap_or(0),
             issues: graph_issue_count,

@@ -7,7 +7,8 @@ for the checker. The upstream library and CLI remain separate targets.
 
 Origin: the standalone `script-checker-tool` repository, baseline commit
 `7ac457adbb313d5dbc110735049ee12be601ea86`, plus the supplied-content extraction
-for INI bundle authoring ticket 01. This snapshot is not an upstream release tag.
+for INI bundle authoring ticket 01 and the prepared-content entry point below.
+This snapshot is not an upstream release tag.
 `CHECKSUMS.sha256` records SHA-256 hashes of Cargo.toml and every Rust source,
 with CRLF normalized to LF. Cargo does not enforce checksums for path dependencies;
 review these hashes when refreshing the snapshot and retain the lockfile change.
@@ -27,6 +28,9 @@ runtime folders or paths written in script payloads, and performs no network I/O
 Missing required names yield `SCRIPT_FILE_MISSING`; unresolved values remain
 visible in the typed reference results. An unknown selected flow is a normal
 error report. Empty selections or empty/duplicate names return `Err(String)`.
+
+Call `parse_contents` instead to inspect main-flow and macro sections before
+expanding the flow graph. Calling `analyze` on that result reuses the parsed data.
 
 Read typed diagnostics, counts, graph findings, and `script_sections` rather than
 parsing display JSON. `source_files` preserves submitted text exactly, in main,
