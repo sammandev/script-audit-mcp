@@ -138,12 +138,19 @@ impl McpServer {
         Parameters(request): Parameters<ValidateLineRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let mut fields = request.line.split('|');
-        let device = fields.next().unwrap_or_default().to_string();
-        let name = fields.next().unwrap_or_default().to_string();
-        self.invoke_function(device, name, move |engine| {
+        let target = crate::is_supported_line_width(fields.clone().count()).then(|| {
+            let device = fields.next().unwrap_or_default().to_string();
+            let name = fields.next().unwrap_or_default().to_string();
+            (device, name)
+        });
+        let validate = move |engine: Engine| {
             engine.validate_line(&request.line, request.device_scope.as_deref())
-        })
-        .await
+        };
+        if let Some((device, name)) = target {
+            self.invoke_function(device, name, validate).await
+        } else {
+            self.invoke_on(|_| Ok(Snapshot::default()), validate).await
+        }
     }
 
     #[tool(
@@ -272,6 +279,32 @@ mod tests {
         fn snapshot(&self) -> EngineResult<Snapshot> {
             Err(Error::Knowledge("catalog must not be loaded".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn wrong_width_validate_line_skips_catalog() -> std::result::Result<(), ErrorData> {
+        let server = McpServer::new(Arc::new(UnavailableCatalog));
+        let result = server
+            .validate_line(Parameters(ValidateLineRequest {
+                line: "SSH|OPEN|DUT@echo|NULL|1|".into(),
+                device_scope: None,
+            }))
+            .await?;
+        assert_eq!(
+            result.structured_content,
+            Some(json!({
+                "status": "invalid",
+                "segments": ["SSH", "OPEN", "DUT@echo", "NULL", "1", ""],
+                "diagnostics": [{
+                    "field": "line",
+                    "code": "field_count",
+                    "message": "expected 5, 7, 8, or 9 pipe-delimited fields",
+                    "severity": "error"
+                }]
+            }))
+        );
+        assert_ne!(result.is_error, Some(true));
+        Ok(())
     }
 
     #[tokio::test]
