@@ -86,31 +86,47 @@ impl PostgresCatalog {
 
 impl Catalog for PostgresCatalog {
     fn snapshot(&self) -> Result<Snapshot> {
-        self.read(None)
+        self.read(SnapshotScope::Full)
+    }
+
+    fn device_snapshot(&self, device: &str) -> Result<Snapshot> {
+        let (source, interface) = crate::device_target(device)?;
+        if interface.contains('\0') {
+            return Ok(Snapshot::default());
+        }
+        self.read(SnapshotScope::Device {
+            source,
+            interface: interface.to_ascii_uppercase(),
+        })
     }
 
     fn function_snapshot(&self, device: &str, name: &str) -> Result<Snapshot> {
         let Ok((source, interface)) = crate::device_target(device) else {
             return self.snapshot();
         };
-        self.read(Some(FunctionKey {
-            source: source.to_string(),
+        self.read(SnapshotScope::Function {
+            source,
             interface: interface.to_ascii_uppercase(),
             name: name.to_ascii_uppercase(),
-        }))
+        })
     }
 }
 
-/// Identifies the Functions a point lookup can resolve to; `interface` and `name`
-/// are ASCII-uppercased to match `Engine::resolve_function`.
-struct FunctionKey {
-    source: String,
-    interface: String,
-    name: String,
+enum SnapshotScope<'a> {
+    Full,
+    Device {
+        source: &'a str,
+        interface: String,
+    },
+    Function {
+        source: &'a str,
+        interface: String,
+        name: String,
+    },
 }
 
 impl PostgresCatalog {
-    fn read(&self, key: Option<FunctionKey>) -> Result<Snapshot> {
+    fn read(&self, scope: SnapshotScope<'_>) -> Result<Snapshot> {
         let mut connection = self.connect()?;
         let mut transaction = connection
             .build_transaction()
@@ -130,16 +146,46 @@ impl PostgresCatalog {
         } else {
             ""
         };
-        // `upper` under the "C" collation folds ASCII only, like `eq_ignore_ascii_case`.
-        let (function_filter, params): (String, Vec<&(dyn ToSql + Sync)>) = match &key {
-            Some(key) => (
-                r#" WHERE source = $1 AND upper(interface COLLATE "C") = $2 AND upper(name COLLATE "C") = $3"#.into(),
-                vec![&key.source, &key.interface, &key.name],
-            ),
-            None => (String::new(), Vec::new()),
+        // A built-in row starting with "DLL" can re-resolve to a DLL row when
+        // list_functions checks composition support using its stored interface.
+        let canonical_dll = match &scope {
+            SnapshotScope::Device {
+                source: "BUILT-IN",
+                interface,
+            } => interface
+                .strip_prefix("DLL")
+                .filter(|target| !target.is_empty()),
+            _ => None,
         };
+        // `upper` under the "C" collation folds ASCII only, like `eq_ignore_ascii_case`.
+        let (function_filter, params): (&str, Vec<&(dyn ToSql + Sync)>) = match (
+            &scope,
+            canonical_dll.as_ref(),
+        ) {
+            (SnapshotScope::Full, _) => ("", Vec::new()),
+            (SnapshotScope::Device { source, interface }, Some(canonical_dll)) => (
+                r#" WHERE (source = $1 AND upper(interface COLLATE "C") = $2) OR (source = 'DLL' AND upper(interface COLLATE "C") = $3)"#,
+                vec![source, interface, canonical_dll],
+            ),
+            (SnapshotScope::Device { source, interface }, None) => (
+                r#" WHERE source = $1 AND upper(interface COLLATE "C") = $2"#,
+                vec![source, interface],
+            ),
+            (
+                SnapshotScope::Function {
+                    source,
+                    interface,
+                    name,
+                },
+                _,
+            ) => (
+                r#" WHERE source = $1 AND upper(interface COLLATE "C") = $2 AND upper(name COLLATE "C") = $3"#,
+                vec![source, interface, name],
+            ),
+        };
+        let params = params.as_slice();
         let scoped = |columns: &str, selected: &str| {
-            if key.is_some() {
+            if !params.is_empty() {
                 format!(
                     " WHERE ({columns}) IN (SELECT {selected} FROM {prefix}functions{function_filter})"
                 )
@@ -149,7 +195,7 @@ impl PostgresCatalog {
         };
         let linked = scoped("function_source, function_name", "source, name");
         let defined = |links: &str| {
-            if key.is_some() {
+            if !params.is_empty() {
                 format!(" WHERE name IN (SELECT name FROM {prefix}{links}{linked})")
             } else {
                 String::new()
@@ -160,7 +206,7 @@ impl PostgresCatalog {
             &format!(
                 "SELECT source, interface, name, description, convention::BIGINT AS convention, category, execution_role, execution_phase{grammar_columns} FROM {prefix}functions{function_filter} ORDER BY source, interface, name"
             ),
-            &params,
+            params,
             |row| {
                 Ok(Function {
                     source: row.try_get("source")?,
@@ -184,6 +230,11 @@ impl PostgresCatalog {
                 })
             },
         )?;
+        let device_only = matches!(scope, SnapshotScope::Device { .. });
+        if device_only && functions.is_empty() {
+            transaction.commit()?;
+            return Ok(Snapshot::default());
+        }
         if contract {
             let audited = scoped(
                 "function_source, function_interface, function_name",
@@ -194,7 +245,7 @@ impl PostgresCatalog {
                 &format!(
                     "SELECT function_source, function_interface, function_name, kind, name, scope FROM mcp_v1_script_key_audits{audited} ORDER BY function_source, function_interface, function_name, kind, name"
                 ),
-                &params,
+                params,
                 |row| {
                     Ok((
                         (
@@ -233,39 +284,43 @@ impl PostgresCatalog {
                 "{prefix}parameter_definitions{}",
                 defined("parameter_links")
             ),
-            &params,
+            params,
         )?;
         let criteria_definitions = definitions(
             &mut transaction,
             &format!("{prefix}criteria_definitions{}", defined("criteria_links")),
-            &params,
+            params,
         )?;
         let parameter_links = links(
             &mut transaction,
             &format!("{prefix}parameter_links{linked}"),
-            &params,
+            params,
         )?;
         let criteria_links = links(
             &mut transaction,
             &format!("{prefix}criteria_links{linked}"),
-            &params,
+            params,
         )?;
-        let examples = rows(
-            &mut transaction,
-            &format!(
-                "SELECT function_source, device_name, function_name, script, meaning FROM {prefix}examples{linked} ORDER BY id"
-            ),
-            &params,
-            |row| {
-                Ok(Example {
-                    function_source: row.try_get("function_source")?,
-                    device_name: row.try_get("device_name")?,
-                    function_name: row.try_get("function_name")?,
-                    script: row.try_get("script")?,
-                    meaning: row.try_get("meaning")?,
-                })
-            },
-        )?;
+        let examples = if device_only {
+            Vec::new()
+        } else {
+            rows(
+                &mut transaction,
+                &format!(
+                    "SELECT function_source, device_name, function_name, script, meaning FROM {prefix}examples{linked} ORDER BY id"
+                ),
+                params,
+                |row| {
+                    Ok(Example {
+                        function_source: row.try_get("function_source")?,
+                        device_name: row.try_get("device_name")?,
+                        function_name: row.try_get("function_name")?,
+                        script: row.try_get("script")?,
+                        meaning: row.try_get("meaning")?,
+                    })
+                },
+            )?
+        };
         transaction.commit()?;
         Ok(Snapshot {
             functions,
@@ -631,7 +686,10 @@ mod tests {
              INSERT INTO examples (function_source, function_name, device_name, script) VALUES
                  ('BUILT-IN', 'SENDSTR', '', 'SSH|SENDSTR|payload|NULL|1'),
                  ('DLL', 'TX_MULTI_VERIFICATION', 'IOT', 'DLLIOT|TX_MULTI_VERIFICATION|ANT=1|NULL|1|NULL|NULL|NULL'),
-                 ('DLL', 'RX', '', 'DLLWIFI_TEST|RX|CHANNEL=1|NULL|1|NULL|NULL|NULL');",
+                 ('DLL', 'RX', '', 'DLLWIFI_TEST|RX|CHANNEL=1|NULL|1|NULL|NULL|NULL');
+             INSERT INTO functions (source, interface, name, convention) VALUES
+                 ('BUILT-IN', 'DLLWIFI_TEST', 'TX_MULTI_VERIFICATION', 2),
+                 ('BUILT-IN', 'ÉCHO', 'F', 1);",
         )?;
         let lookups = [
             ("SSH", "SENDSTR", None),
@@ -679,8 +737,37 @@ mod tests {
             }
             Ok(())
         };
+        let assert_device_snapshots_match = |catalog: &PostgresCatalog| -> Result<()> {
+            let full = crate::Engine::new(catalog.snapshot()?);
+            for (device, function_count) in [
+                ("ssh", 4),
+                ("DLLwifi_test#PROXY", 2),
+                ("dllwifi_test", 3),
+                ("Écho", 1),
+                ("écho", 0),
+                ("MISSING", 0),
+                ("\0", 0),
+            ] {
+                let snapshot = catalog.device_snapshot(device)?;
+                assert_eq!(snapshot.functions.len(), function_count, "{device:?}");
+                assert!(snapshot.examples.is_empty(), "{device:?}");
+                let scoped = crate::Engine::new(snapshot);
+                assert_eq!(
+                    serde_json::json!(scoped.list_functions(Some(device))?),
+                    serde_json::json!(full.list_functions(Some(device))?),
+                    "{device:?}",
+                );
+            }
+            let wifi = catalog.device_snapshot("DLLWIFI_TEST")?;
+            assert_eq!(wifi.parameter_definitions.len(), 3);
+            assert_eq!(wifi.criteria_definitions.len(), 3);
+            assert_eq!(wifi.parameter_links.len(), 3);
+            assert_eq!(wifi.criteria_links.len(), 2);
+            Ok(())
+        };
 
         assert_lookups_match(&fixture.catalog)?;
+        assert_device_snapshots_match(&fixture.catalog)?;
         let scoped = fixture
             .catalog
             .function_snapshot("DLLIOT", "tx_multi_verification")?;
@@ -706,6 +793,7 @@ mod tests {
              CREATE VIEW mcp_v1_examples AS SELECT * FROM examples;",
         )?;
         assert_lookups_match(&fixture.catalog)?;
+        assert_device_snapshots_match(&fixture.catalog)?;
         let scoped = fixture
             .catalog
             .function_snapshot("DLLIOT", "TX_MULTI_VERIFICATION")?;
