@@ -28,7 +28,7 @@ fn missing_value(argument: &str) -> Error {
     }
 }
 
-fn arguments() -> Result<(Option<String>, Option<HttpOptions>)> {
+fn arguments() -> Result<Option<(String, Option<HttpOptions>)>> {
     let mut http: Option<HttpOptions> = None;
     let mut args = env::args_os();
     let _program = args.next();
@@ -39,7 +39,7 @@ fn arguments() -> Result<(Option<String>, Option<HttpOptions>)> {
                 eprintln!(
                     "script-audit-mcp\nSet SCRIPT_AUDIT_DATABASE_URL or DATABASE_URL to a PostgreSQL URL.\nDefault transport is stdio. --http serves the MCP Streamable HTTP transport (--host <address>, --port <number>). Catalog transactions are read-only."
                 );
-                return Ok((None, None));
+                return Ok(None);
             }
             "--http" => {
                 http.get_or_insert_with(HttpOptions::default);
@@ -80,8 +80,12 @@ fn arguments() -> Result<(Option<String>, Option<HttpOptions>)> {
     let database = env::var("SCRIPT_AUDIT_DATABASE_URL")
         .or_else(|_| env::var("DATABASE_URL"))
         .ok()
-        .filter(|database| !database.is_empty());
-    Ok((database, http))
+        .filter(|database| !database.is_empty())
+        .ok_or_else(|| Error::InvalidInput {
+            field: "database configuration".into(),
+            message: "set SCRIPT_AUDIT_DATABASE_URL or DATABASE_URL to a PostgreSQL URL".into(),
+        })?;
+    Ok(Some((database, http)))
 }
 
 #[cfg(feature = "http")]
@@ -114,8 +118,7 @@ async fn serve_http(
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (database, http) = arguments()?;
-    let Some(database) = database else {
+    let Some((database, http)) = arguments()? else {
         return Ok(());
     };
     let catalog = PostgresCatalog::new(&database)?;
