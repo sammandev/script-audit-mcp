@@ -195,6 +195,36 @@ fn get_function_resolves_scoped_schema_and_preserves_examples() -> Result<()> {
 }
 
 #[test]
+fn empty_device_scope_is_invalid_input() -> Result<()> {
+    let engine = fixture();
+    let line = "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|";
+    for scope in [None, Some("WIFI_TEST")] {
+        assert_eq!(
+            engine.validate_line(line, scope)?.status,
+            ValidationStatus::Valid
+        );
+    }
+    for scope in ["", " \t"] {
+        let schema = engine.get_function("DLLWIFI_TEST", "TX_MULTI_VERIFICATION", Some(scope));
+        assert!(
+            matches!(&schema, Err(error) if error.code() == "invalid_input"
+                && error.to_string().contains("invalid device_scope")),
+            "scope {scope:?} should fail with invalid_input, got {schema:?}"
+        );
+        let report = engine.validate_line(line, Some(scope))?;
+        assert_eq!(report.status, ValidationStatus::Invalid);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|issue| issue.code == "invalid_input"
+                    && issue.message.contains("invalid device_scope"))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn suggest_criteria_returns_known_patterns_and_examples() -> Result<()> {
     let suggestions = fixture().suggest_criteria("DLLWIFI_TEST", "TX_MULTI_VERIFICATION", None)?;
     assert_eq!(suggestions.criteria.len(), 1);
