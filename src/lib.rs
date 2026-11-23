@@ -285,11 +285,12 @@ impl Engine {
         let scope = device_scope
             .unwrap_or(&function.interface)
             .to_ascii_uppercase();
-        if scope.trim() != scope || scope.contains(['|', '\r', '\n']) {
+        if scope.is_empty() || scope.trim() != scope || scope.contains(['|', '\r', '\n']) {
             return Err(Error::InvalidInput {
                 field: "device_scope".into(),
-                message: "scope must not contain surrounding whitespace, pipes, or line breaks"
-                    .into(),
+                message:
+                    "scope must not be empty or contain surrounding whitespace, pipes, or line breaks"
+                        .into(),
             });
         }
         let parameters = select_fields(
