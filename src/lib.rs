@@ -341,14 +341,11 @@ impl Engine {
                     return false;
                 }
                 let mut segments = example.script.split('|');
-                segments
-                    .next()
-                    .and_then(|token| device_target(token).ok())
-                    .is_some_and(|(source, interface)| {
-                        source == function.source
-                            && interface.eq_ignore_ascii_case(&function.interface)
-                    })
-                    && segments.next() == Some(function.name.as_str())
+                let (Some(device), Some(name)) = (segments.next(), segments.next()) else {
+                    return false;
+                };
+                self.resolve_function(device, name)
+                    .is_ok_and(|resolved| std::ptr::eq(resolved, function))
             })
             .cloned()
             .collect();

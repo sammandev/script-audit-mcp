@@ -195,6 +195,71 @@ fn get_function_resolves_scoped_schema_and_preserves_examples() -> Result<()> {
 }
 
 #[test]
+fn examples_follow_case_insensitive_function_resolution() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    let canonical = snapshot.examples[0].clone();
+    let lowercase = Example {
+        script: canonical
+            .script
+            .replace("|TX_MULTI_VERIFICATION|", "|tx_multi_verification|"),
+        ..canonical.clone()
+    };
+    snapshot.examples.extend([
+        lowercase.clone(),
+        Example {
+            script: canonical
+                .script
+                .replace("|TX_MULTI_VERIFICATION|", "|OTHER|"),
+            ..canonical.clone()
+        },
+    ]);
+    let engine = Engine::new(snapshot.clone());
+
+    assert_eq!(
+        engine.validate_line(&lowercase.script, None)?.status,
+        ValidationStatus::Valid
+    );
+    for name in ["TX_MULTI_VERIFICATION", "tx_multi_verification"] {
+        let schema = engine.get_function("DLLWIFI_TEST", name, None)?;
+        let suggestions = engine.suggest_criteria("DLLWIFI_TEST", name, None)?;
+        let expected = [&canonical.script, &lowercase.script];
+        assert_eq!(
+            schema
+                .examples
+                .iter()
+                .map(|example| &example.script)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            suggestions
+                .examples
+                .iter()
+                .map(|example| &example.script)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    snapshot.functions.push(Function {
+        name: "tx_multi_verification".into(),
+        ..snapshot.functions[1].clone()
+    });
+    let engine = Engine::new(snapshot);
+    for name in ["TX_MULTI_VERIFICATION", "tx_multi_verification"] {
+        assert!(matches!(
+            engine.get_function("DLLWIFI_TEST", name, None),
+            Err(script_audit_mcp::Error::AmbiguousFunction(_))
+        ));
+        assert!(matches!(
+            engine.suggest_criteria("DLLWIFI_TEST", name, None),
+            Err(script_audit_mcp::Error::AmbiguousFunction(_))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn empty_device_scope_is_invalid_input() -> Result<()> {
     let engine = fixture();
     let line = "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|";
