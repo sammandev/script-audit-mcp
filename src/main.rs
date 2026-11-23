@@ -85,6 +85,13 @@ fn arguments() -> Result<(Option<String>, Option<HttpOptions>)> {
 }
 
 #[cfg(feature = "http")]
+async fn bind_http(options: HttpOptions) -> std::io::Result<(tokio::net::TcpListener, String)> {
+    let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port)).await?;
+    let url = format!("http://{}/mcp", listener.local_addr()?);
+    Ok((listener, url))
+}
+
+#[cfg(feature = "http")]
 async fn serve_http(
     catalog: Arc<PostgresCatalog>,
     options: HttpOptions,
@@ -99,11 +106,8 @@ async fn serve_http(
         StreamableHttpServerConfig::default(),
     );
     let router = axum::Router::new().nest_service("/mcp", http_service);
-    let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port)).await?;
-    eprintln!(
-        "script-audit-mcp: streamable HTTP listening on http://{}:{}/mcp",
-        options.host, options.port
-    );
+    let (listener, url) = bind_http(options).await?;
+    eprintln!("script-audit-mcp: streamable HTTP listening on {url}");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -127,4 +131,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let service = McpServer::new(catalog).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn http_url_reports_the_ephemeral_port() -> std::io::Result<()> {
+        let (listener, url) = bind_http(HttpOptions {
+            port: 0,
+            ..HttpOptions::default()
+        })
+        .await?;
+        assert_eq!(url, format!("http://{}/mcp", listener.local_addr()?));
+        Ok(())
+    }
 }
