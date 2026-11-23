@@ -269,6 +269,23 @@ pub struct PlanReport {
 impl ComparePlanRequest {
     pub fn check_bounds(&self) -> Result<()> {
         self.bundle.check_bounds()?;
+        self.check_plan_bounds()
+    }
+
+    pub(crate) fn prepare(self) -> Result<CheckedComparison> {
+        let parsed = self.bundle.parse_bounded()?;
+        self.check_plan_bounds()?;
+        Ok(CheckedComparison {
+            bundle: super::CheckedBundle {
+                request: self.bundle,
+                parsed,
+            },
+            plan: self.plan,
+            flow_variant: self.flow_variant,
+        })
+    }
+
+    fn check_plan_bounds(&self) -> Result<()> {
         let plan_bytes = serde_json::to_vec(&self.plan)
             .map_err(|_| invalid_request("structured plan cannot be represented"))?
             .len();
@@ -385,8 +402,20 @@ impl ComparePlanRequest {
     }
 }
 
+pub(crate) struct CheckedComparison {
+    bundle: super::CheckedBundle,
+    plan: StructuredPlan,
+    flow_variant: FlowVariant,
+}
+
+impl CheckedComparison {
+    pub(crate) fn compare(self, engine: &Engine) -> Result<serde_json::Value> {
+        compare_checked(self, engine, &[]).map(|(report, _)| report)
+    }
+}
+
 pub fn compare(request: ComparePlanRequest, engine: &Engine) -> Result<serde_json::Value> {
-    compare_with_secrets(request, engine, &[]).map(|(report, _)| report)
+    request.prepare()?.compare(engine)
 }
 
 pub(super) fn compare_with_secrets(
@@ -394,7 +423,14 @@ pub(super) fn compare_with_secrets(
     engine: &Engine,
     declared_secrets: &[String],
 ) -> Result<(serde_json::Value, Vec<String>)> {
-    request.check_bounds()?;
+    compare_checked(request.prepare()?, engine, declared_secrets)
+}
+
+fn compare_checked(
+    request: CheckedComparison,
+    engine: &Engine,
+    declared_secrets: &[String],
+) -> Result<(serde_json::Value, Vec<String>)> {
     let (validation, secrets) =
         super::validate_with_secrets(request.bundle, engine, declared_secrets)?;
     let mut blockers = request.plan.unresolved_questions.clone();
