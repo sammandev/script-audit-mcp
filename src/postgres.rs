@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, env, fs, time::Duration};
 
 use native_tls::{Certificate, Protocol, TlsConnector};
-use postgres::{Client, Config, IsolationLevel, NoTls, Row, Transaction, config::SslMode};
+use postgres::{
+    Client, Config, IsolationLevel, NoTls, Row, Transaction, config::SslMode, types::ToSql,
+};
 use postgres_native_tls::MakeTlsConnector;
 use url::Url;
 
@@ -84,6 +86,31 @@ impl PostgresCatalog {
 
 impl Catalog for PostgresCatalog {
     fn snapshot(&self) -> Result<Snapshot> {
+        self.read(None)
+    }
+
+    fn function_snapshot(&self, device: &str, name: &str) -> Result<Snapshot> {
+        let Ok((source, interface)) = crate::device_target(device) else {
+            return self.snapshot();
+        };
+        self.read(Some(FunctionKey {
+            source: source.to_string(),
+            interface: interface.to_ascii_uppercase(),
+            name: name.to_ascii_uppercase(),
+        }))
+    }
+}
+
+/// Identifies the Functions a point lookup can resolve to; `interface` and `name`
+/// are ASCII-uppercased to match `Engine::resolve_function`.
+struct FunctionKey {
+    source: String,
+    interface: String,
+    name: String,
+}
+
+impl PostgresCatalog {
+    fn read(&self, key: Option<FunctionKey>) -> Result<Snapshot> {
         let mut connection = self.connect()?;
         let mut transaction = connection
             .build_transaction()
@@ -103,11 +130,37 @@ impl Catalog for PostgresCatalog {
         } else {
             ""
         };
+        // `upper` under the "C" collation folds ASCII only, like `eq_ignore_ascii_case`.
+        let (function_filter, params): (String, Vec<&(dyn ToSql + Sync)>) = match &key {
+            Some(key) => (
+                r#" WHERE source = $1 AND upper(interface COLLATE "C") = $2 AND upper(name COLLATE "C") = $3"#.into(),
+                vec![&key.source, &key.interface, &key.name],
+            ),
+            None => (String::new(), Vec::new()),
+        };
+        let scoped = |columns: &str, selected: &str| {
+            if key.is_some() {
+                format!(
+                    " WHERE ({columns}) IN (SELECT {selected} FROM {prefix}functions{function_filter})"
+                )
+            } else {
+                String::new()
+            }
+        };
+        let linked = scoped("function_source, function_name", "source, name");
+        let defined = |links: &str| {
+            if key.is_some() {
+                format!(" WHERE name IN (SELECT name FROM {prefix}{links}{linked})")
+            } else {
+                String::new()
+            }
+        };
         let mut functions = rows(
             &mut transaction,
             &format!(
-                "SELECT source, interface, name, description, convention::BIGINT AS convention, category, execution_role, execution_phase{grammar_columns} FROM {prefix}functions ORDER BY source, interface, name"
+                "SELECT source, interface, name, description, convention::BIGINT AS convention, category, execution_role, execution_phase{grammar_columns} FROM {prefix}functions{function_filter} ORDER BY source, interface, name"
             ),
+            &params,
             |row| {
                 Ok(Function {
                     source: row.try_get("source")?,
@@ -132,9 +185,16 @@ impl Catalog for PostgresCatalog {
             },
         )?;
         if contract {
+            let audited = scoped(
+                "function_source, function_interface, function_name",
+                "source, interface, name",
+            );
             let audits = rows(
                 &mut transaction,
-                "SELECT function_source, function_interface, function_name, kind, name, scope FROM mcp_v1_script_key_audits ORDER BY function_source, function_interface, function_name, kind, name",
+                &format!(
+                    "SELECT function_source, function_interface, function_name, kind, name, scope FROM mcp_v1_script_key_audits{audited} ORDER BY function_source, function_interface, function_name, kind, name"
+                ),
+                &params,
                 |row| {
                     Ok((
                         (
@@ -167,17 +227,35 @@ impl Catalog for PostgresCatalog {
                 }
             }
         }
-        let parameter_definitions =
-            definitions(&mut transaction, &format!("{prefix}parameter_definitions"))?;
-        let criteria_definitions =
-            definitions(&mut transaction, &format!("{prefix}criteria_definitions"))?;
-        let parameter_links = links(&mut transaction, &format!("{prefix}parameter_links"))?;
-        let criteria_links = links(&mut transaction, &format!("{prefix}criteria_links"))?;
+        let parameter_definitions = definitions(
+            &mut transaction,
+            &format!(
+                "{prefix}parameter_definitions{}",
+                defined("parameter_links")
+            ),
+            &params,
+        )?;
+        let criteria_definitions = definitions(
+            &mut transaction,
+            &format!("{prefix}criteria_definitions{}", defined("criteria_links")),
+            &params,
+        )?;
+        let parameter_links = links(
+            &mut transaction,
+            &format!("{prefix}parameter_links{linked}"),
+            &params,
+        )?;
+        let criteria_links = links(
+            &mut transaction,
+            &format!("{prefix}criteria_links{linked}"),
+            &params,
+        )?;
         let examples = rows(
             &mut transaction,
             &format!(
-                "SELECT function_source, device_name, function_name, script, meaning FROM {prefix}examples ORDER BY id"
+                "SELECT function_source, device_name, function_name, script, meaning FROM {prefix}examples{linked} ORDER BY id"
             ),
+            &params,
             |row| {
                 Ok(Example {
                     function_source: row.try_get("function_source")?,
@@ -203,17 +281,23 @@ impl Catalog for PostgresCatalog {
 fn rows<Output>(
     transaction: &mut Transaction<'_>,
     sql: &str,
+    params: &[&(dyn ToSql + Sync)],
     map: impl FnMut(&Row) -> Result<Output>,
 ) -> Result<Vec<Output>> {
-    transaction.query(sql, &[])?.iter().map(map).collect()
+    transaction.query(sql, params)?.iter().map(map).collect()
 }
 
-fn definitions(transaction: &mut Transaction<'_>, table: &str) -> Result<Vec<Definition>> {
+fn definitions(
+    transaction: &mut Transaction<'_>,
+    table: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<Vec<Definition>> {
     rows(
         transaction,
         &format!(
             "SELECT name, device_name, description, type, unit, default_value, allowed_values, cardinality, value_pattern, required::BIGINT AS required FROM {table} ORDER BY name, device_name"
         ),
+        params,
         |row| {
             Ok(Definition {
                 name: row.try_get("name")?,
@@ -231,12 +315,17 @@ fn definitions(transaction: &mut Transaction<'_>, table: &str) -> Result<Vec<Def
     )
 }
 
-fn links(transaction: &mut Transaction<'_>, table: &str) -> Result<Vec<Link>> {
+fn links(
+    transaction: &mut Transaction<'_>,
+    table: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<Vec<Link>> {
     rows(
         transaction,
         &format!(
             "SELECT name, function_source, function_name, device_name, position::BIGINT AS position, required::BIGINT AS required FROM {table} ORDER BY id"
         ),
+        params,
         |row| {
             Ok(Link {
                 name: row.try_get("name")?,
@@ -511,6 +600,124 @@ mod tests {
             .parse::<u16>()
             .map_err(|error| Error::Knowledge(format!("invalid HTTP status: {error}")))?;
         Ok((status, body.to_string()))
+    }
+
+    #[test]
+    fn postgres_function_snapshot_matches_full_snapshot_lookups() -> Result<()> {
+        let fixture = Fixture::empty()?;
+        let mut connection = fixture.catalog.connect()?;
+        connection.batch_execute(&include_str!("../tests/fixtures/schema.sql").replace(
+            "INTEGER PRIMARY KEY",
+            "INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY",
+        ))?;
+        connection.batch_execute(
+            "INSERT INTO functions (source, interface, name, convention) VALUES
+                 ('BUILT-IN', 'SSH', 'SENDSTR', 1), ('BUILT-IN', 'SSH', 'OPEN', 1),
+                 ('BUILT-IN', 'SSH', 'open', 1), ('BUILT-IN', 'SSH', 'ÄX', 1),
+                 ('DLL', 'WIFI_TEST', 'TX_MULTI_VERIFICATION', 2),
+                 ('DLL', 'IOT', 'TX_MULTI_VERIFICATION', 2), ('DLL', 'WIFI_TEST', 'RX', 2);
+             INSERT INTO parameter_definitions (name, device_name, required) VALUES
+                 ('DATA', 'SSH', 1), ('DATA', '', 0), ('ANT', '', 1), ('ANT', 'IOT', 0),
+                 ('CHANNEL', '', 1);
+             INSERT INTO criteria_definitions (name, device_name) VALUES
+                 ('EXPECTED', ''), ('POWER', ''), ('POWER', 'IOT'), ('PER', '');
+             INSERT INTO parameter_links (function_source, function_name, device_name, name, position) VALUES
+                 ('BUILT-IN', 'SENDSTR', 'SSH', 'DATA', 1), ('BUILT-IN', 'OPEN', '', 'DATA', 1),
+                 ('DLL', 'TX_MULTI_VERIFICATION', '', 'ANT', 1),
+                 ('DLL', 'TX_MULTI_VERIFICATION', 'IOT', 'ANT', 1), ('DLL', 'RX', '', 'CHANNEL', 1);
+             INSERT INTO criteria_links (function_source, function_name, device_name, name, position) VALUES
+                 ('BUILT-IN', 'SENDSTR', '', 'EXPECTED', 1),
+                 ('DLL', 'TX_MULTI_VERIFICATION', '', 'POWER', 1), ('DLL', 'RX', '', 'PER', 1);
+             INSERT INTO examples (function_source, function_name, device_name, script) VALUES
+                 ('BUILT-IN', 'SENDSTR', '', 'SSH|SENDSTR|payload|NULL|1'),
+                 ('DLL', 'TX_MULTI_VERIFICATION', 'IOT', 'DLLIOT|TX_MULTI_VERIFICATION|ANT=1|NULL|1|NULL|NULL|NULL'),
+                 ('DLL', 'RX', '', 'DLLWIFI_TEST|RX|CHANNEL=1|NULL|1|NULL|NULL|NULL');",
+        )?;
+        let lookups = [
+            ("SSH", "SENDSTR", None),
+            ("ssh", "sendstr", Some("ssh")),
+            ("SSH", "OPEN", None),
+            ("SSH", "ÄX", None),
+            ("SSH", "äx", None),
+            ("SSH", "MISSING", None),
+            ("DLLWIFI_TEST", "tx_multi_verification", Some("iot")),
+            ("DLLIOT#QUICK", "TX_MULTI_VERIFICATION", None),
+            (" SSH", "SENDSTR", None),
+        ];
+        let lines = [
+            "SSH|SENDSTR|payload|NULL|1",
+            "DLLIOT|TX_MULTI_VERIFICATION|ANT=1|POWER=1|1|NULL|NULL|NULL",
+            "SSH|OPEN|DUT|NULL|1",
+            "SSH",
+            "; SSH|SENDSTR|payload|NULL|1",
+        ];
+        let outcome = |result: Result<String>| result.unwrap_or_else(|error| error.to_string());
+        let assert_lookups_match = |catalog: &PostgresCatalog| -> Result<()> {
+            let full = crate::Engine::new(catalog.snapshot()?);
+            for (device, name, scope) in lookups {
+                let scoped = crate::Engine::new(catalog.function_snapshot(device, name)?);
+                let get = |engine: &crate::Engine| {
+                    outcome(engine.get_function(device, name, scope).and_then(|schema| {
+                        serde_json::to_string(&schema)
+                            .map_err(|error| Error::Knowledge(error.to_string()))
+                    }))
+                };
+                assert_eq!(get(&scoped), get(&full), "{device}/{name}");
+            }
+            for line in lines {
+                let mut fields = line.split('|');
+                let device = fields.next().unwrap_or_default();
+                let name = fields.next().unwrap_or_default();
+                let scoped = crate::Engine::new(catalog.function_snapshot(device, name)?);
+                let validate = |engine: &crate::Engine| {
+                    outcome(engine.validate_line(line, None).and_then(|report| {
+                        serde_json::to_string(&report)
+                            .map_err(|error| Error::Knowledge(error.to_string()))
+                    }))
+                };
+                assert_eq!(validate(&scoped), validate(&full), "{line}");
+            }
+            Ok(())
+        };
+
+        assert_lookups_match(&fixture.catalog)?;
+        let scoped = fixture
+            .catalog
+            .function_snapshot("DLLIOT", "tx_multi_verification")?;
+        assert_eq!(scoped.functions.len(), 1);
+        assert_eq!(scoped.parameter_definitions.len(), 2);
+        assert_eq!(scoped.criteria_definitions.len(), 2);
+        assert_eq!(scoped.parameter_links.len(), 2);
+        assert_eq!(scoped.criteria_links.len(), 1);
+        assert_eq!(scoped.examples.len(), 1);
+
+        connection.batch_execute(
+            "CREATE VIEW mcp_v1_functions AS
+             SELECT *, 'named'::TEXT AS grammar_encoding, 'line'::TEXT AS grammar_scope FROM functions;
+             CREATE TABLE mcp_v1_script_key_audits AS
+             SELECT source AS function_source, interface AS function_interface,
+                    name AS function_name, 'parameter'::TEXT AS kind, 'ANT'::TEXT AS name,
+                    'line'::TEXT AS scope
+             FROM functions;
+             CREATE VIEW mcp_v1_parameter_definitions AS SELECT * FROM parameter_definitions;
+             CREATE VIEW mcp_v1_criteria_definitions AS SELECT * FROM criteria_definitions;
+             CREATE VIEW mcp_v1_parameter_links AS SELECT * FROM parameter_links;
+             CREATE VIEW mcp_v1_criteria_links AS SELECT * FROM criteria_links;
+             CREATE VIEW mcp_v1_examples AS SELECT * FROM examples;",
+        )?;
+        assert_lookups_match(&fixture.catalog)?;
+        let scoped = fixture
+            .catalog
+            .function_snapshot("DLLIOT", "TX_MULTI_VERIFICATION")?;
+        assert_eq!(scoped.functions.len(), 1);
+        assert_eq!(
+            scoped.functions[0]
+                .audited_grammar
+                .as_ref()
+                .map(|grammar| grammar.script_keys.len()),
+            Some(1)
+        );
+        Ok(())
     }
 
     #[test]

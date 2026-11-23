@@ -7,7 +7,10 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{Catalog, Engine, Error, Result as EngineResult, model::ComposeRequest};
+use crate::{
+    Catalog, Engine, Error, Result as EngineResult,
+    model::{ComposeRequest, Snapshot},
+};
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -75,7 +78,8 @@ impl McpServer {
         &self,
         Parameters(request): Parameters<GetFunctionRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        self.invoke(move |engine| {
+        let (device, name) = (request.device.clone(), request.name.clone());
+        self.invoke_function(device, name, move |engine| {
             engine.get_function(
                 &request.device,
                 &request.name,
@@ -93,7 +97,8 @@ impl McpServer {
         &self,
         Parameters(request): Parameters<SuggestCriteriaRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        self.invoke(move |engine| {
+        let (device, name) = (request.device.clone(), request.function.clone());
+        self.invoke_function(device, name, move |engine| {
             engine.suggest_criteria(
                 &request.device,
                 &request.function,
@@ -111,7 +116,8 @@ impl McpServer {
         &self,
         Parameters(request): Parameters<ComposeRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        self.invoke(move |engine| engine.compose_line(request))
+        let (device, name) = (request.device.clone(), request.function.clone());
+        self.invoke_function(device, name, move |engine| engine.compose_line(request))
             .await
     }
 
@@ -123,7 +129,10 @@ impl McpServer {
         &self,
         Parameters(request): Parameters<ValidateLineRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        self.invoke(move |engine| {
+        let mut fields = request.line.split('|');
+        let device = fields.next().unwrap_or_default().to_string();
+        let name = fields.next().unwrap_or_default().to_string();
+        self.invoke_function(device, name, move |engine| {
             engine.validate_line(&request.line, request.device_scope.as_deref())
         })
         .await
@@ -190,9 +199,32 @@ impl McpServer {
         &self,
         operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.invoke_on(|catalog| catalog.snapshot(), operation)
+            .await
+    }
+
+    /// Runs an operation that only looks up the `device`/`name` Function.
+    async fn invoke_function<Output: Serialize + Send + 'static>(
+        &self,
+        device: String,
+        name: String,
+        operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.invoke_on(
+            move |catalog| catalog.function_snapshot(&device, &name),
+            operation,
+        )
+        .await
+    }
+
+    async fn invoke_on<Output: Serialize + Send + 'static>(
+        &self,
+        load: impl FnOnce(&dyn Catalog) -> EngineResult<Snapshot> + Send + 'static,
+        operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
         let catalog = Arc::clone(&self.catalog);
         let outcome =
-            tokio::task::spawn_blocking(move || operation(Engine::new(catalog.snapshot()?)))
+            tokio::task::spawn_blocking(move || operation(Engine::new(load(catalog.as_ref())?)))
                 .await
                 .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         match outcome {
