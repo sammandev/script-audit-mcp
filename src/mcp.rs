@@ -345,6 +345,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_main_flow_skips_catalog() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let server = McpServer::new(Arc::new(UnavailableCatalog));
+        let bundle = json!({
+            "files": [{"name": "TEST_SPEC.ini", "text": "[SPEC]\nA=1\n"}],
+            "selected_flow": "[TEST FLOW:Normal]",
+            "dialect": "hh5k"
+        });
+        let plan = json!({
+            "controlling_source": "fixture", "station": "Normal", "requirements": [],
+            "sources": [{"id": "fixture", "revision": "1", "kind": "test_plan", "approved": true}]
+        });
+        let comparison = json!({"bundle": bundle, "plan": plan, "flow_variant": "normal"});
+        let composition = json!({"comparison": comparison, "flow_anchor": "; anchor\n"});
+        let results = [
+            server
+                .validate_ini_bundle(Parameters(serde_json::from_value(bundle.clone())?))
+                .await?,
+            server
+                .compare_plan_to_bundle(Parameters(serde_json::from_value(comparison.clone())?))
+                .await?,
+            server
+                .compose_ini_bundle(Parameters(serde_json::from_value(composition)?))
+                .await?,
+        ];
+        let expected = Some(json!({"error": {
+            "code": "invalid_input",
+            "message": "invalid bundle: MAIN_FLOW.ini is required to select a flow",
+            "diagnostics": []
+        }}));
+        for result in results {
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.structured_content, expected);
+        }
+
+        let mut duplicate_sources = comparison;
+        duplicate_sources["plan"]["sources"][0]["id"] = json!("");
+        let result = server
+            .compare_plan_to_bundle(Parameters(serde_json::from_value(duplicate_sources)?))
+            .await?;
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"error": {
+                "code": "invalid_input",
+                "message": "invalid bundle: source IDs must be nonempty and unique",
+                "diagnostics": []
+            }}))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn wrong_width_validate_line_skips_catalog() -> std::result::Result<(), ErrorData> {
         let server = McpServer::new(Arc::new(UnavailableCatalog));
         let result = server

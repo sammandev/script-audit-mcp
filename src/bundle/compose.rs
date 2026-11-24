@@ -120,7 +120,7 @@ impl ComposeBundleRequest {
     }
 
     pub(crate) fn prepare(self) -> Result<CheckedComposition> {
-        let parsed = self.parse_bounded()?;
+        let parsed = super::require_main_flow(self.parse_bounded()?)?;
         Ok(CheckedComposition {
             request: self,
             parsed,
@@ -159,7 +159,7 @@ impl ComposeBundleRequest {
 /// A composition request whose bounds passed, with the base bundle parse they produced.
 pub(crate) struct CheckedComposition {
     request: ComposeBundleRequest,
-    parsed: Option<ParsedContentAnalysis>,
+    parsed: ParsedContentAnalysis,
 }
 
 pub fn compose(request: ComposeBundleRequest, engine: &Engine) -> Result<Value> {
@@ -475,6 +475,7 @@ fn compose_checked(checked: CheckedComposition, engine: &Engine) -> Result<Value
                 })
                 .parse_bounded()
                 .ok()
+                .flatten()
             } else {
                 None
             };
