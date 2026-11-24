@@ -353,6 +353,41 @@ fn validate_line_checks_eight_fields_without_losing_trailing_empty_field() -> Re
 }
 
 #[test]
+fn validate_line_reports_timeout_overflow() -> Result<()> {
+    let engine = fixture();
+    for (function, timeout, expected_message) in [
+        ("OPEN", "18446744073709551616", Some("too large")),
+        ("UNKNOWN", "18446744073709551616", Some("too large")),
+        ("OPEN", "0", Some("must be positive")),
+        ("OPEN", "+1", Some("must be positive")),
+        ("OPEN", "18446744073709551615", None),
+    ] {
+        let line = format!("SSH|{function}|DUT@echo|NULL|{timeout}");
+        let report = engine.validate_line(&line, None)?;
+        assert_eq!(report.segments[4], timeout);
+        if let Some(expected_message) = expected_message {
+            assert_eq!(report.status, ValidationStatus::Invalid);
+            let issues: Vec<_> = report
+                .diagnostics
+                .iter()
+                .filter(|issue| issue.field == "timeout")
+                .collect();
+            assert_eq!(issues.len(), 1, "{line}: {:?}", report.diagnostics);
+            assert_eq!(issues[0].code, "invalid_timeout");
+            assert!(
+                issues[0].message.contains(expected_message),
+                "{line}: expected message containing {expected_message:?}, got {:?}",
+                issues[0].message
+            );
+        } else {
+            assert_eq!(report.status, ValidationStatus::Valid);
+            assert!(report.diagnostics.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn validate_line_reports_commented_lines_instead_of_unknown_functions() -> Result<()> {
     for line in [
         ";DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=5dB|20000|NEXT|FAIL|",
