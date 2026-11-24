@@ -6390,6 +6390,29 @@ async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Resul
         assert_eq!(report["validation"]["status"], "valid", "{report}");
         assert_eq!(report["coverage"][0]["status"], expected, "{report}");
     }
+    for (frequency, expected) in [("6115", "unknown"), ("6175", "conflicting")] {
+        let mut unaudited_bridge = args.clone();
+        replace_plan_script(
+            &mut unaudited_bridge,
+            maybe,
+            &maybe
+                .replace("FREQ=6115", &format!("FREQ={frequency}"))
+                .replace("FRAME_COUNT=500", "FRAME_COUNT=*E:Input-Count#")
+                .replace("EVM=-35dB", "EVM=<-35dB"),
+        );
+        let report = plan_report(unaudited_bridge).await?;
+        assert!(
+            report["validation"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.iter().any(|issue| {
+                    issue["code"] == "RUNTIME_REFERENCE_UNCHECKED"
+                        && issue["line"] == 7
+                        && issue["severity"] == "unsupported"
+                })),
+            "{report}"
+        );
+        assert_eq!(report["coverage"][0]["status"], expected, "{report}");
+    }
     replace_plan_script(
         &mut args,
         "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=2",
