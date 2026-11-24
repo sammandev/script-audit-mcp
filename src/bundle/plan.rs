@@ -434,7 +434,7 @@ pub(super) fn compare_checked(
     declared_secrets: &[String],
 ) -> Result<(serde_json::Value, Vec<String>)> {
     let (validation, secrets) =
-        super::validate_with_secrets(request.bundle, engine, declared_secrets)?;
+        super::validate_with_secrets(request.bundle, || Ok(engine), declared_secrets)?;
     let mut blockers = request.plan.unresolved_questions.clone();
     let sampling_policy =
         assess_sampling_policy(&request.plan, request.flow_variant, &mut blockers);

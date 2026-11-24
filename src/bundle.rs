@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Borrow, collections::HashSet};
 
 use schemars::JsonSchema;
 use script_checker::{
@@ -326,18 +326,21 @@ pub(crate) fn require_main_flow(
 }
 
 pub fn validate(request: ValidateBundleRequest, engine: &Engine) -> Result<BundleReport> {
-    request.prepare()?.validate(engine)
+    request.prepare()?.validate(|| Ok(engine))
 }
 
 impl CheckedBundle {
-    pub(crate) fn validate(self, engine: &Engine) -> Result<BundleReport> {
-        validate_with_secrets(self, engine, &[]).map(|(report, _)| report)
+    pub(crate) fn validate<E: Borrow<Engine>>(
+        self,
+        load_engine: impl FnOnce() -> Result<E>,
+    ) -> Result<BundleReport> {
+        validate_with_secrets(self, load_engine, &[]).map(|(report, _)| report)
     }
 }
 
-fn validate_with_secrets(
+fn validate_with_secrets<E: Borrow<Engine>>(
     checked: CheckedBundle,
-    engine: &Engine,
+    load_engine: impl FnOnce() -> Result<E>,
     declared_secrets: &[String],
 ) -> Result<(BundleReport, Vec<String>)> {
     let CheckedBundle { request, parsed } = checked;
@@ -448,12 +451,14 @@ fn validate_with_secrets(
     );
     let (mut execution, execution_edges) =
         semantics::analyze(&analysis, &request, &mut diagnostics, &mut secrets);
-    catalog::validate(
-        engine,
-        &execution,
-        request.device_scope.as_deref(),
-        &mut diagnostics,
-    );
+    if !execution.is_empty() {
+        catalog::validate(
+            load_engine()?.borrow(),
+            &execution,
+            request.device_scope.as_deref(),
+            &mut diagnostics,
+        );
+    }
     if !request.runtime_bindings.is_empty() {
         diagnostics.push(
             BundleDiagnostic::new(

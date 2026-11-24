@@ -178,10 +178,9 @@ impl McpServer {
             Ok(request) => request,
             Err(error) => return Ok(domain_error(error)),
         };
-        self.invoke_on(
-            |catalog| catalog.snapshot_without_examples(),
-            move |engine| request.validate(&engine),
-        )
+        self.invoke_catalog(move |catalog| {
+            request.validate(|| catalog.snapshot_without_examples().map(Engine::new))
+        })
         .await
     }
 
@@ -270,11 +269,18 @@ impl McpServer {
         load: impl FnOnce(&dyn Catalog) -> EngineResult<Snapshot> + Send + 'static,
         operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.invoke_catalog(move |catalog| operation(Engine::new(load(catalog)?)))
+            .await
+    }
+
+    async fn invoke_catalog<Output: Serialize + Send + 'static>(
+        &self,
+        operation: impl FnOnce(&dyn Catalog) -> EngineResult<Output> + Send + 'static,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
         let catalog = Arc::clone(&self.catalog);
-        let outcome =
-            tokio::task::spawn_blocking(move || operation(Engine::new(load(catalog.as_ref())?)))
-                .await
-                .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let outcome = tokio::task::spawn_blocking(move || operation(catalog.as_ref()))
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         match outcome {
             Ok(output) => serde_json::to_value(output)
                 .map(CallToolResult::structured)

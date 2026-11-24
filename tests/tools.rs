@@ -9062,6 +9062,18 @@ async fn bundle_uses_one_snapshot_and_keeps_concurrent_requests_isolated() -> Re
     let count = Arc::new(AtomicUsize::new(0));
     let server =
         script_audit_mcp::mcp::McpServer::new(Arc::new(CountingCatalog(Arc::clone(&count))));
+    let empty = serde_json::from_value(bundle_arguments("[TEST FLOW:Normal]\n"))
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    let empty = server
+        .validate_ini_bundle(rmcp::handler::server::wrapper::Parameters(empty))
+        .await
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    assert!(empty.structured_content.is_some_and(|report| {
+        report["diagnostics"][0]["code"] == "FLOW_EMPTY"
+            && report["execution"].as_array().is_some_and(Vec::is_empty)
+    }));
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+
     let invalid =
         serde_json::from_value(bundle_arguments("[TEST FLOW:Normal]\nRUN = \"MISSING\"\n"))
             .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
@@ -9073,7 +9085,7 @@ async fn bundle_uses_one_snapshot_and_keeps_concurrent_requests_isolated() -> Re
         server.validate_ini_bundle(rmcp::handler::server::wrapper::Parameters(invalid)),
         server.validate_ini_bundle(rmcp::handler::server::wrapper::Parameters(clean)),
     );
-    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     let bad = bad.map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
     let good = good.map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
     assert!(
@@ -9083,6 +9095,21 @@ async fn bundle_uses_one_snapshot_and_keeps_concurrent_requests_isolated() -> Re
     assert!(good.structured_content.is_some_and(
         |report| report["status"] == "valid" && report["layers"]["control_flow"] == "valid"
     ));
+
+    let unselected = serde_json::from_value(bundle_arguments(
+        "[TEST FLOW:Normal]\n[RUN]\nA = \"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=5dB|1|QUIT|FAIL\"\n",
+    ))
+    .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    let unselected = server
+        .validate_ini_bundle(rmcp::handler::server::wrapper::Parameters(unselected))
+        .await
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    assert!(unselected.structured_content.is_some_and(|report| {
+        report["diagnostics"][0]["code"] == "FLOW_EMPTY"
+            && report["execution"][0]["section"] == "RUN"
+            && report["layers"]["catalog"] == "valid"
+    }));
+    assert_eq!(count.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
