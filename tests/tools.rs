@@ -8431,6 +8431,38 @@ async fn bundle_review_regression_exposes_deferred_checks_and_rejected_row_locat
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn bundle_rejects_script_rows_missing_an_equals_sign() -> Result<()> {
+    let prefix =
+        "[TEST FLOW:Normal]\nRUN = \"RUN\"\n[RUN]\nA = \"SSH|OPEN|test@host|NULL|10|NEXT|FAIL\"\n";
+    let row = "B \"SSH|OPEN|test@host|NULL|10|QUIT|FAIL\"\n";
+    let report = bundle_report(bundle_arguments(&format!("{prefix}{row}"))).await?;
+    assert_eq!(report["status"], "invalid", "{report}");
+    assert_eq!(report["layers"]["structure"], "invalid");
+    assert!(report["diagnostics"].as_array().is_some_and(|issues| {
+        issues.iter().any(|issue| {
+            issue["code"] == "FUNCTION_ROW_INVALID"
+                && issue["severity"] == "error"
+                && issue["file"] == "MAIN_FLOW.ini"
+                && issue["line"] == 5
+                && issue["section"] == "RUN"
+                && issue["field"] == "row"
+        })
+    }));
+
+    let corrected = format!("{prefix}{}", row.replacen("B ", "B = ", 1));
+    let report = bundle_report(bundle_arguments(&corrected)).await?;
+    assert_eq!(report["status"], "valid", "{report}");
+    assert_eq!(report["execution"][1]["row"], "B");
+
+    let commented = format!("{prefix}; {row}");
+    let report = bundle_report(bundle_arguments(&commented)).await?;
+    assert_eq!(report["status"], "valid", "{report}");
+    assert_eq!(report["execution"].as_array().map(Vec::len), Some(1));
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn program2_hh5k_outer_quotes_preserve_embedded_sfis_payload() -> Result<()> {
     let text = concat!(
         "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
