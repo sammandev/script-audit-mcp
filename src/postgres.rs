@@ -672,26 +672,16 @@ mod tests {
         let mut connection = fixture.catalog.connect()?;
         let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
         let runtime = tokio::runtime::Runtime::new()?;
-        let list = || {
-            runtime
-                .block_on(server.list_functions(Parameters(ListFunctionsRequest::default())))
-                .map_err(|error| Error::Knowledge(error.to_string()))
-        };
-
-        let original = list()?;
-        assert_ne!(original.is_error, Some(true));
-        assert_eq!(
-            original
-                .structured_content
-                .as_ref()
-                .map(|value| &value["functions"][0]["name"]),
-            Some(&serde_json::json!("SENDSTR"))
-        );
+        let full = crate::Engine::new(fixture.catalog.snapshot()?);
+        let original = serde_json::json!({"functions": full.list_functions(None)?});
+        assert_eq!(original["functions"][0]["name"], "SENDSTR");
 
         connection.batch_execute("ALTER TABLE examples RENAME TO examples_data")?;
-        let listing = list()?;
+        let listing = runtime
+            .block_on(server.list_functions(Parameters(ListFunctionsRequest::default())))
+            .map_err(|error| Error::Knowledge(error.to_string()))?;
         assert_ne!(listing.is_error, Some(true), "{listing:?}");
-        assert_eq!(listing.structured_content, original.structured_content);
+        assert_eq!(listing.structured_content, Some(original));
 
         connection.batch_execute("ALTER TABLE examples_data RENAME TO examples")?;
         let point = runtime
