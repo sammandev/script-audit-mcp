@@ -273,7 +273,7 @@ impl ComparePlanRequest {
     }
 
     pub(crate) fn prepare(self) -> Result<CheckedComparison> {
-        let parsed = self.parse_bounded()?;
+        let parsed = super::require_main_flow(self.parse_bounded()?)?;
         Ok(self.into_checked(parsed))
     }
 
@@ -284,7 +284,7 @@ impl ComparePlanRequest {
     }
 
     /// `parsed` must be this request's own `parse_bounded` result.
-    pub(super) fn into_checked(self, parsed: Option<ParsedContentAnalysis>) -> CheckedComparison {
+    pub(super) fn into_checked(self, parsed: ParsedContentAnalysis) -> CheckedComparison {
         CheckedComparison {
             bundle: super::CheckedBundle {
                 request: self.bundle,

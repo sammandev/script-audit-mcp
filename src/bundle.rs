@@ -176,7 +176,7 @@ impl ValidateBundleRequest {
     }
 
     pub(crate) fn prepare(self) -> Result<CheckedBundle> {
-        let parsed = self.parse_bounded()?;
+        let parsed = require_main_flow(self.parse_bounded()?)?;
         Ok(CheckedBundle {
             request: self,
             parsed,
@@ -255,7 +255,7 @@ impl ValidateBundleRequest {
             .iter()
             .find(|file| file.name.eq_ignore_ascii_case("MAIN_FLOW.ini"))
         else {
-            // Bounds checks permit a missing main file; validation reports it after the snapshot.
+            // Bounds checks permit a missing main file; `prepare` reports it after every bound.
             return Ok(None);
         };
         let macros = self
@@ -315,7 +315,14 @@ impl ValidateBundleRequest {
 
 pub(crate) struct CheckedBundle {
     request: ValidateBundleRequest,
+    parsed: ParsedContentAnalysis,
+}
+
+/// Rejects a bundle without MAIN_FLOW.ini once its bounds passed, before the catalog is read.
+pub(crate) fn require_main_flow(
     parsed: Option<ParsedContentAnalysis>,
+) -> Result<ParsedContentAnalysis> {
+    parsed.ok_or_else(|| invalid_request("MAIN_FLOW.ini is required to select a flow"))
 }
 
 pub fn validate(request: ValidateBundleRequest, engine: &Engine) -> Result<BundleReport> {
@@ -334,8 +341,6 @@ fn validate_with_secrets(
     declared_secrets: &[String],
 ) -> Result<(BundleReport, Vec<String>)> {
     let CheckedBundle { request, parsed } = checked;
-    let parsed =
-        parsed.ok_or_else(|| invalid_request("MAIN_FLOW.ini is required to select a flow"))?;
     let has_macros = parsed.macro_sections().is_some();
     let main_section_count = parsed.main_sections().sections.len();
     let analysis = parsed.analyze();
