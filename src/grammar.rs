@@ -417,7 +417,7 @@ pub(crate) fn fixed_issues(request: &ComposeRequest, convention: Option<i64>) ->
 
 pub(crate) fn compose(schema: &FunctionSchema, request: &ComposeRequest) -> Result<ComposeResult> {
     let mut issues = fixed_issues(request, schema.function.convention);
-    issues.extend(support_issues(schema));
+    issues.extend(schema.diagnostics.iter().cloned());
     let encoding = profile(&schema.function);
     for (sections, prefix) in [
         (&request.param_sections, "params.sections"),
