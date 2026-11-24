@@ -138,7 +138,9 @@ impl McpServer {
         Parameters(request): Parameters<ValidateLineRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let mut fields = request.line.split('|');
-        let target = crate::is_supported_line_width(fields.clone().count()).then(|| {
+        let target = (!crate::is_commented_line(&request.line)
+            && crate::is_supported_line_width(fields.clone().count()))
+        .then(|| {
             let device = fields.next().unwrap_or_default().to_string();
             let name = fields.next().unwrap_or_default().to_string();
             (device, name)
@@ -330,6 +332,38 @@ mod tests {
             }))
         );
         assert_ne!(result.is_error, Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commented_validate_line_skips_catalog() -> std::result::Result<(), ErrorData> {
+        let server = McpServer::new(Arc::new(UnavailableCatalog));
+        for line in [
+            ";SSH|OPEN|dut@hello|NULL|500",
+            "  //SSH|OPEN|dut@hello|NULL|500",
+        ] {
+            let result = server
+                .validate_line(Parameters(ValidateLineRequest {
+                    line: line.into(),
+                    device_scope: None,
+                }))
+                .await?;
+            assert_eq!(
+                result.structured_content,
+                Some(json!({
+                    "status": "invalid",
+                    "segments": line.split('|').collect::<Vec<_>>(),
+                    "diagnostics": [{
+                        "field": "line",
+                        "code": "commented_line",
+                        "message": "line is commented out with ';' or '//' and the tester skips it; remove the comment prefix to validate the row",
+                        "severity": "error"
+                    }]
+                })),
+                "{line}"
+            );
+            assert_ne!(result.is_error, Some(true));
+        }
         Ok(())
     }
 
