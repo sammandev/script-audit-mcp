@@ -6239,6 +6239,24 @@ async fn plan_requires_all_individual_chains_on_one_path() -> Result<()> {
             report["mandatory"]["matched"],
             u32::from(coverage == "matched")
         );
+        if (selector_fail, first_pass) == ("CHAIN2", "QUIT") {
+            assert_eq!(
+                report["coverage"][0]["reasons"],
+                json!(["No single usable execution path covers all required antenna chains."])
+            );
+            let execution_ids = |rows: &serde_json::Value| {
+                rows.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|row| row["execution_id"].clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                execution_ids(&report["coverage"][0]["evidence"]),
+                vec![json!("row:1"), json!("row:2")]
+            );
+            assert_eq!(execution_ids(&report["additional"]), vec![json!("row:0")]);
+        }
     }
     Ok(())
 }

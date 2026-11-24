@@ -533,6 +533,7 @@ pub(super) fn compare_checked(
                 _ => unknown.push(measurement.row, reasons),
             }
         }
+        let mut chain_path_conflict = None;
         let mut chain_path_unknown = false;
         if let Some(Chains::PerChain(expected)) = &test.chains && !partials.is_empty() {
             let graph = chain_graph.get_or_insert_with(|| {
@@ -557,9 +558,24 @@ pub(super) fn compare_checked(
                     }
                     matches.rows.extend(partials);
                 }
+                ChainPath::SplitAcrossPaths if matches.rows.is_empty() => {
+                    let mut candidates = Candidates::default();
+                    let mut witnessed = HashSet::new();
+                    for row in partials {
+                        if antenna_masks(row).into_iter().filter(|mask| expected.contains(mask))
+                            .any(|mask| witnessed.insert(mask))
+                        {
+                            candidates.push(row, Vec::new());
+                        } else {
+                            candidates.rows.push(row);
+                        }
+                    }
+                    chain_path_conflict = Some(candidates);
+                }
+                ChainPath::SplitAcrossPaths => {}
                 ChainPath::NotCovered => {
                     for row in partials {
-                        mismatches.push(row, vec!["No single usable execution path covers all required antenna chains.".into()]);
+                        mismatches.push(row, vec!["Individual antenna-chain coverage is incomplete.".into()]);
                     }
                 }
                 ChainPath::Unknown => {
@@ -573,6 +589,10 @@ pub(super) fn compare_checked(
         let candidates = if !matches.rows.is_empty() {
             case.status = "matched";
             matches
+        } else if let Some(candidates) = chain_path_conflict {
+            case.status = "conflicting";
+            case.reasons.push("No single usable execution path covers all required antenna chains.".into());
+            candidates
         } else if !chain_path_unknown && !mismatches.rows.is_empty() {
             case.status = "conflicting";
             mismatches
@@ -1021,6 +1041,7 @@ fn wifi_band_context(validation: &BundleReport) -> HashMap<&str, &str> {
 
 enum ChainPath<'a> {
     Matched(Vec<&'a ExecutionRow>),
+    SplitAcrossPaths,
     NotCovered,
     Unknown,
 }
@@ -1079,6 +1100,8 @@ fn individual_chain_path<'a>(
     }
     if uncertain {
         ChainPath::Unknown
+    } else if masks.values().fold(0, |bits, &(_, mask)| bits | mask) == required {
+        ChainPath::SplitAcrossPaths
     } else {
         ChainPath::NotCovered
     }
