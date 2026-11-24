@@ -6173,6 +6173,403 @@ async fn plan_combines_individual_chain_evidence_without_counting_composite_mask
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_review_split_chains_cannot_bypass_setup() -> Result<()> {
+    use serde_json::json;
+    let mut args = tx_plan_arguments();
+    let mut setup = args["plan"]["requirements"][0].clone();
+    setup["id"] = json!("SETUP");
+    setup["test"]["frequency"]["value"] = json!(6175);
+    args["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+    args["plan"]["requirements"][0]["depends_on"] = json!(["SETUP"]);
+    args["plan"]["requirements"] = json!([args["plan"]["requirements"][0], setup]);
+    let row = args["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let mut text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n".to_string();
+    for (name, freq, ant, pass, fail) in [
+        ("SELECT", "6235", "1", "EARLY1", "EARLY2"),
+        ("EARLY1", "6115", "1", "SETUP", "FAIL"),
+        ("EARLY2", "6115", "2", "SETUP", "FAIL"),
+        ("SETUP", "6175", "1,2,4,8", "FULL", "FAIL"),
+        ("FULL", "6115", "1,2", "QUIT", "FAIL"),
+    ] {
+        text.push_str(
+            &row.replace("OFDM6=", &format!("{name}="))
+                .replace("FREQ=6115", &format!("FREQ={freq}"))
+                .replace("ANT=1,2,4,8", &format!("ANT={ant}"))
+                .replace("|QUIT|FAIL", &format!("|{pass}|{fail}")),
+        );
+        text.push('\n');
+    }
+    args["bundle"]["files"][0]["text"] = json!(text);
+    let report = plan_report(args).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert_eq!(report["coverage"][1]["status"], "matched", "{report}");
+    assert_eq!(report["coverage"][0]["status"], "conflicting");
+    assert_eq!(report["ready_for_review"], false);
+    assert_eq!(
+        report["coverage"][0]["reasons"],
+        json!([
+            "SETUP: A reachable measurement/procedure can occur before successful completion of its prerequisite."
+        ])
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn plan_requires_all_individual_chains_on_one_path() -> Result<()> {
+    use serde_json::json;
+    let arguments = tx_plan_arguments();
+    let row = arguments["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let first = row
+        .replace("OFDM6=", "CHAIN1=")
+        .replace("ANT=1,2,4,8", "ANT=1");
+    let second = row
+        .replace("OFDM6=", "CHAIN2=")
+        .replace("ANT=1,2,4,8", "ANT=2");
+    for (selector_fail, first_pass, reachability, validation, status, coverage) in [
+        ("CHAIN1", "CHAIN2", "reachable", "valid", "valid", "matched"),
+        (
+            "CHAIN1",
+            "QUIT",
+            "unreachable",
+            "valid",
+            "invalid",
+            "conflicting",
+        ),
+        (
+            "CHAIN2",
+            "QUIT",
+            "reachable",
+            "valid",
+            "invalid",
+            "conflicting",
+        ),
+        (
+            "CHAIN2",
+            "*E:Routes-After#",
+            "reachable",
+            "incomplete",
+            "incomplete",
+            "unknown",
+        ),
+    ] {
+        let mut request = arguments.clone();
+        request["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+        let selector = row
+            .replace("OFDM6=", "SELECT=")
+            .replace("FREQ=6115", "FREQ=6175")
+            .replace("|QUIT|FAIL", &format!("|CHAIN1|{selector_fail}"));
+        let first = first.replace("|QUIT|FAIL", &format!("|{first_pass}|FAIL"));
+        request["bundle"]["files"][0]["text"] = json!(format!(
+            "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n{selector}\n{first}\n{second}\n"
+        ));
+        let report = plan_report(request).await?;
+        assert_eq!(report["validation"]["status"], validation, "{report}");
+        assert_eq!(
+            report["validation"]["execution"][2]["reachability"],
+            reachability
+        );
+        assert_eq!(
+            report["status"], status,
+            "selector fail={selector_fail}, first pass={first_pass}"
+        );
+        assert_eq!(report["coverage"][0]["status"], coverage, "{report}");
+        assert_eq!(report["ready_for_review"], status == "valid");
+        assert_eq!(
+            report["mandatory"]["matched"],
+            u32::from(coverage == "matched")
+        );
+        if (selector_fail, first_pass) == ("CHAIN2", "QUIT") {
+            assert_eq!(
+                report["coverage"][0]["reasons"],
+                json!(["No single usable execution path covers all required antenna chains."])
+            );
+            let execution_ids = |rows: &serde_json::Value| {
+                rows.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|row| row["execution_id"].clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                execution_ids(&report["coverage"][0]["evidence"]),
+                vec![json!("row:1"), json!("row:2")]
+            );
+            assert_eq!(execution_ids(&report["additional"]), vec![json!("row:0")]);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Result<()> {
+    use serde_json::json;
+    let mut args = tx_plan_arguments();
+    args["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+    let row = args["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let mut text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n".to_string();
+    for (name, freq, ant, pass, fail, evm) in [
+        ("SELECT", "6175", "1", "CHAIN1", "CHAIN2", "<-35"),
+        ("CHAIN1", "6115", "1", "MAYBE", "FAIL", "<-35"),
+        ("CHAIN2", "6115", "2", "QUIT", "FAIL", "<-35"),
+        ("MAYBE", "6115", "2", "QUIT", "FAIL", "-35"),
+    ] {
+        text.push_str(
+            &row.replace("OFDM6=", &format!("{name}="))
+                .replace("FREQ=6115", &format!("FREQ={freq}"))
+                .replace("ANT=1,2,4,8", &format!("ANT={ant}"))
+                .replace("|QUIT|FAIL", &format!("|{pass}|{fail}"))
+                .replace("EVM=<-35dB", &format!("EVM={evm}dB")),
+        );
+        text.push('\n');
+    }
+    args["bundle"]["files"][0]["text"] = json!(text);
+    let report = plan_report(args.clone()).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert_eq!(report["coverage"][0]["status"], "unknown");
+    assert_eq!(report["status"], "incomplete");
+    assert_eq!(report["ready_for_review"], false);
+    let execution_ids = |rows: &serde_json::Value| {
+        rows.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["execution_id"].as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        execution_ids(&report["coverage"][0]["evidence"]),
+        ["row:1", "row:2", "row:3"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(
+        execution_ids(&report["additional"]),
+        ["row:0"].into_iter().map(str::to_owned).collect()
+    );
+    let mut rx_bridge = args.clone();
+    let maybe = text
+        .lines()
+        .find(|line| line.starts_with("MAYBE="))
+        .unwrap_or_default();
+    replace_plan_script(
+        &mut rx_bridge,
+        maybe,
+        "MAYBE=\"DLLWIFI_TEST|RX_VERIFY_PER|BAND=6G&ANT=2&STANDARD=11AG&FREQ=6115&BW=20&DATA_RATE=OFDM6&RX_TARGET_POWER=-80dBm&FRAME_COUNT=500|PER=<10%|1|QUIT|FAIL\"",
+    );
+    let report = plan_report(rx_bridge).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert_eq!(
+        report["validation"]["execution"][3]["function"],
+        "RX_VERIFY_PER"
+    );
+    assert_eq!(report["coverage"][0]["status"], "conflicting");
+    assert_eq!(report["status"], "invalid");
+    let mut redacted_rate = args.clone();
+    redacted_rate["bundle"]["sensitive_values"] = json!(["MCS7"]);
+    replace_plan_script(
+        &mut redacted_rate,
+        maybe,
+        &maybe.replace("DATA_RATE=OFDM6", "DATA_RATE=MCS7"),
+    );
+    let report = plan_report(redacted_rate).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert!(
+        report["validation"]["execution"][3]["parameters"]
+            .as_str()
+            .is_some_and(|parameters| parameters.contains("DATA_RATE=[REDACTED]"))
+    );
+    assert_eq!(report["coverage"][0]["status"], "unknown");
+    assert_eq!(report["status"], "incomplete");
+    for (frequency, redact_rate, expected) in [
+        ("6.115GHz", false, "unknown"),
+        ("6175", true, "conflicting"),
+    ] {
+        let mut alternate = args.clone();
+        let mut alternate_row = maybe
+            .replace("FREQ=6115", &format!("FREQ={frequency}"))
+            .replace("EVM=-35dB", "EVM=<-35dB");
+        if redact_rate {
+            alternate["bundle"]["sensitive_values"] = json!(["MCS7"]);
+            alternate_row = alternate_row.replace("DATA_RATE=OFDM6", "DATA_RATE=MCS7");
+        }
+        replace_plan_script(&mut alternate, maybe, &alternate_row);
+        let report = plan_report(alternate).await?;
+        assert_eq!(report["validation"]["status"], "valid", "{report}");
+        assert_eq!(report["coverage"][0]["status"], expected, "{report}");
+    }
+    for (frequency, expected) in [("6115", "unknown"), ("6175", "conflicting")] {
+        let mut unaudited_bridge = args.clone();
+        replace_plan_script(
+            &mut unaudited_bridge,
+            maybe,
+            &maybe
+                .replace("FREQ=6115", &format!("FREQ={frequency}"))
+                .replace("FRAME_COUNT=500", "FRAME_COUNT=*E:Input-Count#")
+                .replace("EVM=-35dB", "EVM=<-35dB"),
+        );
+        let report = plan_report(unaudited_bridge).await?;
+        assert!(
+            report["validation"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.iter().any(|issue| {
+                    issue["code"] == "RUNTIME_REFERENCE_UNCHECKED"
+                        && issue["line"] == 7
+                        && issue["severity"] == "unsupported"
+                })),
+            "{report}"
+        );
+        assert_eq!(report["coverage"][0]["status"], expected, "{report}");
+    }
+    replace_plan_script(
+        &mut args,
+        "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=2",
+        "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=1",
+    );
+    let report = plan_report(args).await?;
+    assert_eq!(report["coverage"][0]["status"], "conflicting");
+    assert_eq!(report["status"], "invalid");
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn plan_individual_chain_coverage_follows_macro_returns() -> Result<()> {
+    use serde_json::json;
+
+    let mut arguments = tx_plan_arguments();
+    arguments["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+    let row = arguments["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let selector = row
+        .replace("OFDM6=", "SELECT=")
+        .replace("FREQ=6115", "FREQ=6175")
+        .replace("|QUIT|FAIL", "|CALL|CHAIN2");
+    let chain1 = row
+        .replace("OFDM6=", "CHAIN1=")
+        .replace("ANT=1,2,4,8", "ANT=1");
+    let chain2 = row
+        .replace("OFDM6=", "CHAIN2=")
+        .replace("ANT=1,2,4,8", "ANT=2");
+
+    for (return_target, expected) in [("CHAIN2", "matched"), ("QUIT", "conflicting")] {
+        arguments["bundle"]["files"] = json!([
+            {"name": "MAIN_FLOW.ini", "text": format!(
+                "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n{selector}\nCALL=\"MACRO|MEASURE|NULL|NULL|1|{return_target}|FAIL\"\n{chain2}\n"
+            )},
+            {"name": "MACRO_LIST.ini", "text": format!("[MEASURE]\n{chain1}\n")}
+        ]);
+        let report = plan_report(arguments.clone()).await?;
+        let validation = &report["validation"];
+        assert_eq!(validation["status"], "valid", "{validation}");
+        let row_id = |name: &str| {
+            validation["execution"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|row| row["row"] == name)
+                .map(|row| row["id"].clone())
+                .ok_or_else(|| script_audit_mcp::Error::Knowledge(format!("missing row {name}")))
+        };
+        let has_edge = |kind, source, target| {
+            validation["execution_edges"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|edge| {
+                    edge["kind"] == kind
+                        && edge["source"] == source
+                        && edge["target"] == target
+                        && edge["certainty"] == "supported"
+                })
+        };
+        assert!(has_edge("macro_call", row_id("CALL")?, row_id("CHAIN1")?));
+        let return_id = if return_target == "CHAIN2" {
+            row_id("CHAIN2")?
+        } else {
+            json!("terminal:QUIT")
+        };
+        assert!(has_edge("macro_success", row_id("CHAIN1")?, return_id));
+        assert_eq!(report["coverage"][0]["status"], expected, "{report}");
+        assert_eq!(report["ready_for_review"], expected == "matched");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn plan_chain_path_budget_does_not_depend_on_requirement_order() -> Result<()> {
+    use serde_json::json;
+
+    let mut arguments = tx_plan_arguments();
+    let row = arguments["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let mut text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n".to_string();
+    let mut append = |name: &str, mask: u32, pass: &str, fail: &str| {
+        let mut row = row
+            .replace("OFDM6=", &format!("{name}="))
+            .replace("ANT=1,2,4,8", &format!("ANT={mask}"))
+            .replace("|QUIT|FAIL", &format!("|{pass}|{fail}"));
+        if mask == 8 {
+            row = row
+                .replace("FREQ=6115", "FREQ=6175")
+                .replace("DATA_RATE=OFDM6", "DATA_RATE=OFDM9");
+        }
+        text.push_str(&row);
+        text.push('\n');
+    };
+    append("SELECT", 8, "CHAIN1", "PADDING0");
+    append("CHAIN1", 1, "CHAIN2", "FAIL");
+    append("CHAIN2", 2, "PADDING0", "FAIL");
+    for index in 0..600 {
+        append(&format!("PADDING{index}"), 8, "NEXT", "NEXT");
+    }
+    append("CHAIN4", 4, "QUIT", "FAIL");
+    arguments["bundle"]["files"][0]["text"] = json!(text);
+
+    let mut quick = arguments["plan"]["requirements"][0].clone();
+    quick["test"]["chains"]["value"] = json!([1, 2]);
+    let mut requirements = (0..75)
+        .map(|index| {
+            let mut long = quick.clone();
+            long["id"] = json!(format!("LONG-{index}"));
+            long["test"]["chains"]["value"] = json!([1, 2, 4]);
+            long
+        })
+        .collect::<Vec<_>>();
+    requirements.insert(0, quick);
+    arguments["plan"]["requirements"] = json!(requirements);
+    let first = plan_report(arguments.clone()).await?;
+    assert_eq!(first["validation"]["status"], "valid");
+    assert_eq!(first["coverage"][0]["status"], "matched", "quick first");
+
+    requirements.rotate_left(1);
+    arguments["plan"]["requirements"] = json!(requirements);
+    let last = plan_report(arguments).await?;
+    assert_eq!(last["coverage"][75]["status"], "matched", "quick last");
+    for report in [first, last] {
+        assert_eq!(report["mandatory"]["matched"], 76);
+        assert_eq!(report["ready_for_review"], true);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_comparison_budget_never_reports_partial_analysis_as_ready() -> Result<()> {
     use serde_json::json;
     let mut arguments = tx_plan_arguments();

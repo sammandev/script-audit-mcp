@@ -476,6 +476,7 @@ pub(super) fn compare_checked(
     let mut used = HashSet::new();
     let mut witnesses = BTreeMap::new();
     let mut comparisons = 0;
+    let mut chain_graph = None;
     let mut coverage: Vec<_> = request.plan.requirements.iter().filter(|requirement| {
         requirement.applicability == Applicability::Mandatory || request.flow_variant == FlowVariant::Sampling
     }).map(|requirement| {
@@ -498,6 +499,7 @@ pub(super) fn compare_checked(
         let mut partials = Vec::new();
         let mut mismatches = Candidates::default();
         let mut unknown = Candidates::default();
+        let mut possible_chains = Vec::new();
         let mut budget_exhausted = false;
         for measurement in &measurements {
             if !measurement.is_candidate(test) {
@@ -520,6 +522,7 @@ pub(super) fn compare_checked(
                 continue;
             }
             let (mut status, mut reasons) = measurement.compare(test);
+            let known_mismatch = status == "conflicting";
             if unaudited {
                 status = "unknown";
                 reasons.push("This execution row has invalid or unsupported validation checks.".into());
@@ -528,32 +531,99 @@ pub(super) fn compare_checked(
                 "matched" => matches.push(measurement.row, reasons),
                 "partial" => partials.push(measurement.row),
                 "conflicting" => mismatches.push(measurement.row, reasons),
-                _ => unknown.push(measurement.row, reasons),
-            }
-        }
-        if let Some(Chains::PerChain(expected)) = &test.chains {
-            let masks: HashSet<_> = partials.iter().flat_map(|row| antenna_masks(row)).collect();
-            if !partials.is_empty() && expected.iter().all(|mask| masks.contains(mask)) {
-                let mut witnessed = HashSet::new();
-                for row in partials {
-                    let witnesses: Vec<_> = antenna_masks(row).into_iter()
-                        .filter(|mask| expected.contains(mask)).collect();
-                    if witnesses.into_iter().any(|mask| witnessed.insert(mask)) {
-                        matches.push(row, Vec::new());
-                    } else {
-                        matches.rows.push(row);
+                _ => {
+                    unknown.push(measurement.row, reasons);
+                    if matches!(test.chains, Some(Chains::PerChain(_)))
+                        && !known_mismatch
+                        && measurement.matches_radio_identity(test)
+                        && (!measurement.row.redacted
+                            || measurement.compare_radio_fields(test).0 != "conflicting")
+                    {
+                        possible_chains.push(measurement.row);
                     }
                 }
-            } else {
-                for row in partials {
-                    mismatches.push(row, vec!["Individual antenna-chain coverage is incomplete.".into()]);
+            }
+        }
+        let mut chain_path_conflict = None;
+        let mut chain_path_unknown = false;
+        if let Some(Chains::PerChain(expected)) = &test.chains && !partials.is_empty() {
+            let mut chain_budget = 262_144;
+            let graph = chain_graph.get_or_insert_with(|| {
+                let mut graph: HashMap<&str, Vec<_>> = HashMap::new();
+                for edge in &validation.execution_edges {
+                    graph.entry(&edge.source).or_default().push(edge);
+                }
+                graph
+            });
+            let required = expected.iter().fold(0, |bits, mask| bits | mask);
+            let confirmed = || partials.iter().map(|&row| {
+                (row, antenna_masks(row).into_iter().fold(0, |bits, mask| bits | mask))
+            });
+            let entry = validation.execution.first()
+                .filter(|_| !budget_exhausted)
+                .filter(|entry| entry.reachability == "reachable");
+            let path = entry.map_or(ChainPath::Unknown, |entry|
+                individual_chain_path(&entry.id, required, confirmed(), graph, &mut chain_budget));
+            match path {
+                ChainPath::Matched(evidence) => {
+                    for row in evidence {
+                        if matches.evidence.len() < 64 {
+                            matches.evidence.push((row, Vec::new()));
+                        }
+                    }
+                    matches.rows.extend(partials);
+                }
+                ChainPath::SplitAcrossPaths if matches.rows.is_empty() => {
+                    let possible_path = !possible_chains.is_empty() && entry.is_some_and(|entry| {
+                        let possible = possible_chains.iter().map(|&row| (row, possible_antenna_mask(row, required)));
+                        matches!(
+                            individual_chain_path(&entry.id, required, confirmed().chain(possible), graph, &mut chain_budget),
+                            ChainPath::Matched(_) | ChainPath::Unknown
+                        )
+                    });
+                    if possible_path {
+                        chain_path_unknown = true;
+                        for row in partials {
+                            unknown.push(row, Vec::new());
+                        }
+                        case.reasons.push("Unresolved measurements or the path budget leave single-path antenna-chain coverage unproven.".into());
+                    } else {
+                        let mut candidates = Candidates::default();
+                        let mut witnessed = HashSet::new();
+                        for row in partials {
+                            if antenna_masks(row).into_iter().filter(|mask| expected.contains(mask))
+                                .any(|mask| witnessed.insert(mask))
+                            {
+                                candidates.push(row, Vec::new());
+                            } else {
+                                candidates.rows.push(row);
+                            }
+                        }
+                        chain_path_conflict = Some(candidates);
+                    }
+                }
+                ChainPath::SplitAcrossPaths => matches.rows.extend(partials),
+                ChainPath::NotCovered => {
+                    for row in partials {
+                        mismatches.push(row, vec!["Individual antenna-chain coverage is incomplete.".into()]);
+                    }
+                }
+                ChainPath::Unknown => {
+                    chain_path_unknown = true;
+                    for row in partials {
+                        unknown.push(row, vec!["Execution graph or antenna-chain path budget is incomplete; single-path coverage is unproven.".into()]);
+                    }
                 }
             }
         }
         let candidates = if !matches.rows.is_empty() {
             case.status = "matched";
             matches
-        } else if !mismatches.rows.is_empty() {
+        } else if let Some(candidates) = chain_path_conflict {
+            case.status = "conflicting";
+            case.reasons.push("No single usable execution path covers all required antenna chains.".into());
+            candidates
+        } else if !chain_path_unknown && !mismatches.rows.is_empty() {
             case.status = "conflicting";
             mismatches
         } else if !unknown.rows.is_empty() {
@@ -999,6 +1069,91 @@ fn wifi_band_context(validation: &BundleReport) -> HashMap<&str, &str> {
     context
 }
 
+enum ChainPath<'a> {
+    Matched(Vec<&'a ExecutionRow>),
+    SplitAcrossPaths,
+    NotCovered,
+    Unknown,
+}
+
+fn individual_chain_path<'a>(
+    entry: &str,
+    required: u32,
+    candidates: impl IntoIterator<Item = (&'a ExecutionRow, u32)>,
+    graph: &HashMap<&str, Vec<&super::ExecutionEdge>>,
+    budget: &mut usize,
+) -> ChainPath<'a> {
+    let masks: HashMap<_, _> = candidates
+        .into_iter()
+        .map(|(row, bits)| (row.id.as_str(), (row, bits & required)))
+        .collect();
+    let mut queue = VecDeque::from([(entry, 0, [None; 4])]);
+    let mut seen = HashSet::new();
+    let mut uncertain = false;
+    while let Some((current, mut covered, mut evidence)) = queue.pop_front() {
+        if *budget == 0 {
+            return ChainPath::Unknown;
+        }
+        *budget -= 1;
+        if let Some(&(row, bits)) = masks.get(current)
+            && bits & !covered != 0
+        {
+            covered |= bits;
+            if let Some(slot) = evidence.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(row);
+            }
+            if covered == required {
+                return ChainPath::Matched(evidence.into_iter().flatten().collect());
+            }
+        }
+        if !seen.insert((current, covered)) {
+            continue;
+        }
+        let edges = graph.get(current).map_or(&[][..], Vec::as_slice);
+        if *budget < edges.len() {
+            *budget = 0;
+            return ChainPath::Unknown;
+        }
+        *budget -= edges.len();
+        for edge in edges {
+            if edge.certainty == "supported" && edge.target != "unknown" {
+                queue.push_back((edge.target.as_str(), covered, evidence));
+            } else {
+                uncertain = true;
+            }
+        }
+    }
+    if uncertain {
+        ChainPath::Unknown
+    } else if masks.values().fold(0, |bits, &(_, mask)| bits | mask) == required {
+        ChainPath::SplitAcrossPaths
+    } else {
+        ChainPath::NotCovered
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn individual_chain_path_distinguishes_exhaustion_from_missing_coverage() {
+    let edge = super::ExecutionEdge {
+        source: "entry".into(),
+        target: "terminal:QUIT".into(),
+        kind: "pass",
+        certainty: "supported",
+    };
+    let graph = HashMap::from([("entry", vec![&edge])]);
+    let mut budget = 2;
+    assert!(matches!(
+        individual_chain_path("entry", 3, [], &graph, &mut budget),
+        ChainPath::Unknown
+    ));
+    let mut budget = 3;
+    assert!(matches!(
+        individual_chain_path("entry", 3, [], &graph, &mut budget),
+        ChainPath::NotCovered
+    ));
+}
+
 fn success_order(
     required: &HashSet<&str>,
     consumers: &HashSet<&str>,
@@ -1170,6 +1325,24 @@ impl<'a> Measurement<'a> {
         }
     }
 
+    fn matches_radio_identity(&self, test: &TxTest) -> bool {
+        let device = self.row.device.split('#').next();
+        self.purpose() == test.purpose.as_deref()
+            && match test.technology.as_deref() {
+                Some("wifi") => {
+                    device == Some("DLLWIFI_TEST") && self.row.function != "TX_MULTI_VERIFY"
+                }
+                Some("bluetooth") => {
+                    device == Some("DLLIOT")
+                        && matches!(
+                            self.row.function.as_str(),
+                            "TX_MULTI_VERIFY" | "RX_VERIFY_PER"
+                        )
+                }
+                _ => false,
+            }
+    }
+
     fn is_candidate(&self, test: &TxTest) -> bool {
         if let Some(procedure) = &test.procedure {
             (self.row.device == procedure.device && self.row.function == procedure.function)
@@ -1284,6 +1457,11 @@ impl<'a> Measurement<'a> {
                 vec!["Redacted execution values cannot establish coverage.".into()],
             );
         }
+        self.compare_radio_fields(test)
+    }
+
+    fn compare_radio_fields(&self, test: &TxTest) -> (&'static str, Vec<String>) {
+        let bluetooth = test.technology.as_deref() == Some("bluetooth");
         let mut mismatches = Vec::new();
         let mut unknown = Vec::new();
         let mut partial = false;
@@ -1300,19 +1478,7 @@ impl<'a> Measurement<'a> {
                 "Specified dimensions are outside the audited Bluetooth/Wi-Fi profile.".into(),
             );
         }
-        let identity = self
-            .row
-            .device
-            .split_once('#')
-            .map_or(self.row.device.as_str(), |(base, _)| base);
-        if identity != if bluetooth { "DLLIOT" } else { "DLLWIFI_TEST" }
-            || bluetooth
-                && !matches!(
-                    self.row.function.as_str(),
-                    "TX_MULTI_VERIFY" | "RX_VERIFY_PER"
-                )
-            || !bluetooth && self.row.function == "TX_MULTI_VERIFY"
-            || self.purpose() != test.purpose.as_deref()
+        if !self.matches_radio_identity(test)
             || self.row.redacted
             || self.row.reachability != "reachable"
         {
@@ -1348,7 +1514,10 @@ impl<'a> Measurement<'a> {
                 continue;
             }
             match (expected, actual) {
-                (Some(expected), Some(actual)) if !super::semantics::has_reference(actual) => {
+                (Some(expected), Some(actual))
+                    if !super::semantics::has_reference(actual)
+                        && !(self.row.redacted && actual.contains("[REDACTED]")) =>
+                {
                     if expected != actual {
                         mismatches.push(format!(
                             "{name}: literal dimension differs from the requirement."
@@ -1525,13 +1694,32 @@ impl<'a> Measurement<'a> {
 }
 
 fn antenna_masks(row: &ExecutionRow) -> Vec<u32> {
-    row.parameters
-        .split('&')
-        .find_map(|assignment| assignment.strip_prefix("ANT="))
+    antenna_value(row)
         .into_iter()
         .flat_map(|value| value.split(','))
         .filter_map(|mask| mask.parse().ok())
         .collect()
+}
+
+fn antenna_value(row: &ExecutionRow) -> Option<&str> {
+    row.parameters
+        .split('&')
+        .find_map(|assignment| assignment.strip_prefix("ANT="))
+}
+
+fn possible_antenna_mask(row: &ExecutionRow, required: u32) -> u32 {
+    let Some(value) = antenna_value(row) else {
+        return required;
+    };
+    let mut bits = 0;
+    for value in value.split(',') {
+        match value.parse::<u32>() {
+            Ok(mask @ (1 | 2 | 4 | 8)) => bits |= mask,
+            Ok(_) => return 0,
+            Err(_) => bits |= required,
+        }
+    }
+    bits
 }
 
 fn quantity(text: &str, unit: &str, implicit_unit: bool) -> Option<f64> {
