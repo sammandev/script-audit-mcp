@@ -71,7 +71,7 @@ impl McpServer {
         self.invoke_on(
             move |catalog| match device.as_deref() {
                 Some(device) => catalog.device_snapshot(device),
-                None => catalog.snapshot(),
+                None => catalog.listing_snapshot(),
             },
             list,
         )

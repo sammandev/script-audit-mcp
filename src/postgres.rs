@@ -89,6 +89,10 @@ impl Catalog for PostgresCatalog {
         self.read(SnapshotScope::Full)
     }
 
+    fn listing_snapshot(&self) -> Result<Snapshot> {
+        self.read(SnapshotScope::Listing)
+    }
+
     fn device_snapshot(&self, device: &str) -> Result<Snapshot> {
         let (source, interface) = crate::device_target(device)?;
         if interface.contains('\0') {
@@ -114,6 +118,7 @@ impl Catalog for PostgresCatalog {
 
 enum SnapshotScope<'a> {
     Full,
+    Listing,
     Device {
         source: &'a str,
         interface: String,
@@ -162,7 +167,7 @@ impl PostgresCatalog {
             &scope,
             canonical_dll.as_ref(),
         ) {
-            (SnapshotScope::Full, _) => ("", Vec::new()),
+            (SnapshotScope::Full | SnapshotScope::Listing, _) => ("", Vec::new()),
             (SnapshotScope::Device { source, interface }, Some(canonical_dll)) => (
                 r#" WHERE (source = $1 AND upper(interface COLLATE "C") = $2) OR (source = 'DLL' AND upper(interface COLLATE "C") = $3)"#,
                 vec![source, interface, canonical_dll],
@@ -301,7 +306,7 @@ impl PostgresCatalog {
             &format!("{prefix}criteria_links{linked}"),
             params,
         )?;
-        let examples = if device_only {
+        let examples = if matches!(scope, SnapshotScope::Listing | SnapshotScope::Device { .. }) {
             Vec::new()
         } else {
             rows(
@@ -655,6 +660,56 @@ mod tests {
             .parse::<u16>()
             .map_err(|error| Error::Knowledge(format!("invalid HTTP status: {error}")))?;
         Ok((status, body.to_string()))
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn postgres_broad_listing_does_not_read_examples() -> Result<()> {
+        use crate::mcp::{GetFunctionRequest, ListFunctionsRequest, McpServer};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let fixture = Fixture::new()?;
+        let mut connection = fixture.catalog.connect()?;
+        let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
+        let runtime = tokio::runtime::Runtime::new()?;
+        let list = || {
+            runtime
+                .block_on(server.list_functions(Parameters(ListFunctionsRequest::default())))
+                .map_err(|error| Error::Knowledge(error.to_string()))
+        };
+
+        let original = list()?;
+        assert_ne!(original.is_error, Some(true));
+        assert_eq!(
+            original
+                .structured_content
+                .as_ref()
+                .map(|value| &value["functions"][0]["name"]),
+            Some(&serde_json::json!("SENDSTR"))
+        );
+
+        connection.batch_execute("ALTER TABLE examples RENAME TO examples_data")?;
+        let listing = list()?;
+        assert_ne!(listing.is_error, Some(true), "{listing:?}");
+        assert_eq!(listing.structured_content, original.structured_content);
+
+        connection.batch_execute("ALTER TABLE examples_data RENAME TO examples")?;
+        let point = runtime
+            .block_on(server.get_function(Parameters(GetFunctionRequest {
+                device: "SSH".into(),
+                name: "SENDSTR".into(),
+                device_scope: None,
+            })))
+            .map_err(|error| Error::Knowledge(error.to_string()))?;
+        assert_ne!(point.is_error, Some(true));
+        assert_eq!(
+            point
+                .structured_content
+                .as_ref()
+                .map(|value| &value["examples"][0]["script"]),
+            Some(&serde_json::json!("SSH|SENDSTR|payload|NULL|1"))
+        );
+        Ok(())
     }
 
     #[test]
