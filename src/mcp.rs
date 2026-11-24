@@ -163,11 +163,7 @@ impl McpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let request = match request.prepare() {
             Ok(request) => request,
-            Err(error) => {
-                return Ok(CallToolResult::structured_error(serde_json::json!({
-                    "error": { "code": error.code(), "message": error.to_string(), "diagnostics": [] }
-                })));
-            }
+            Err(error) => return Ok(domain_error(error)),
         };
         self.invoke(move |engine| request.validate(&engine)).await
     }
@@ -182,11 +178,7 @@ impl McpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let request = match request.prepare() {
             Ok(request) => request,
-            Err(error) => {
-                return Ok(CallToolResult::structured_error(serde_json::json!({
-                    "error": { "code": error.code(), "message": error.to_string(), "diagnostics": [] }
-                })));
-            }
+            Err(error) => return Ok(domain_error(error)),
         };
         self.invoke(move |engine| request.compare(&engine)).await
     }
@@ -201,11 +193,7 @@ impl McpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let request = match request.prepare() {
             Ok(request) => request,
-            Err(error) => {
-                return Ok(CallToolResult::structured_error(serde_json::json!({
-                    "error": { "code": error.code(), "message": error.to_string(), "diagnostics": [] }
-                })));
-            }
+            Err(error) => return Ok(domain_error(error)),
         };
         self.invoke(move |engine| request.compose(&engine)).await
     }
@@ -254,18 +242,19 @@ impl McpServer {
             Ok(output) => serde_json::to_value(output)
                 .map(CallToolResult::structured)
                 .map_err(|error| ErrorData::internal_error(error.to_string(), None)),
-            Err(error) => {
-                let diagnostics = if let Error::Validation(issues) = &error {
-                    issues.clone()
-                } else {
-                    Vec::new()
-                };
-                Ok(CallToolResult::structured_error(serde_json::json!({
-                    "error": { "code": error.code(), "message": error.to_string(), "diagnostics": diagnostics }
-                })))
-            }
+            Err(error) => Ok(domain_error(error)),
         }
     }
+}
+
+fn domain_error(error: Error) -> CallToolResult {
+    let diagnostics = match &error {
+        Error::Validation(issues) => issues.as_slice(),
+        _ => &[],
+    };
+    CallToolResult::structured_error(serde_json::json!({
+        "error": { "code": error.code(), "message": error.to_string(), "diagnostics": diagnostics }
+    }))
 }
 
 #[cfg(test)]
@@ -279,6 +268,43 @@ mod tests {
         fn snapshot(&self) -> EngineResult<Snapshot> {
             Err(Error::Knowledge("catalog must not be loaded".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn bundle_preflight_errors_skip_catalog()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let server = McpServer::new(Arc::new(UnavailableCatalog));
+        let bundle = json!({"files": [], "selected_flow": "", "dialect": "hh5k"});
+        let comparison = json!({
+            "bundle": bundle,
+            "plan": {
+                "controlling_source": "fixture", "station": "Normal", "requirements": [],
+                "sources": [{"id": "", "revision": "1", "kind": "test_plan", "approved": false}]
+            },
+            "flow_variant": "normal"
+        });
+        let composition = json!({"comparison": comparison, "flow_anchor": "x".repeat(513)});
+        let results = [
+            server
+                .validate_ini_bundle(Parameters(serde_json::from_value(bundle)?))
+                .await?,
+            server
+                .compare_plan_to_bundle(Parameters(serde_json::from_value(comparison)?))
+                .await?,
+            server
+                .compose_ini_bundle(Parameters(serde_json::from_value(composition)?))
+                .await?,
+        ];
+        let expected = Some(json!({"error": {
+            "code": "invalid_input",
+            "message": "invalid bundle: supply between 1 and 16 logical files",
+            "diagnostics": []
+        }}));
+        for result in results {
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.structured_content, expected);
+        }
+        Ok(())
     }
 
     #[tokio::test]
