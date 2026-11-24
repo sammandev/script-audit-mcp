@@ -556,7 +556,15 @@ pub(crate) fn compose(
             if let Some(field) = schema.criteria.first() {
                 let values = BTreeMap::from([(field.name.clone(), Value::Single(value.clone()))]);
                 emit_fields(&schema.criteria, &values, Encoding::Raw, true, &mut issues)
-            } else if value.is_empty() || value == NULL_CRITERION {
+            } else if value == NULL_CRITERION {
+                String::new()
+            } else if value.is_empty() {
+                issues.push(diagnostic(
+                    "criteria",
+                    "invalid_value",
+                    "empty criteria is not allowed; omit criteria or pass NULL",
+                    Severity::Error,
+                ));
                 String::new()
             } else {
                 issues.push(diagnostic(
