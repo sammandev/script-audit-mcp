@@ -500,6 +500,7 @@ pub(super) fn compare_checked(
         let mut partials = Vec::new();
         let mut mismatches = Candidates::default();
         let mut unknown = Candidates::default();
+        let mut possible_chains = Vec::new();
         let mut budget_exhausted = false;
         for measurement in &measurements {
             if !measurement.is_candidate(test) {
@@ -522,6 +523,7 @@ pub(super) fn compare_checked(
                 continue;
             }
             let (mut status, mut reasons) = measurement.compare(test);
+            let known_mismatch = status == "conflicting";
             if unaudited {
                 status = "unknown";
                 reasons.push("This execution row has invalid or unsupported validation checks.".into());
@@ -530,7 +532,17 @@ pub(super) fn compare_checked(
                 "matched" => matches.push(measurement.row, reasons),
                 "partial" => partials.push(measurement.row),
                 "conflicting" => mismatches.push(measurement.row, reasons),
-                _ => unknown.push(measurement.row, reasons),
+                _ => {
+                    unknown.push(measurement.row, reasons);
+                    if matches!(test.chains, Some(Chains::PerChain(_)))
+                        && !known_mismatch
+                        && measurement.matches_radio_identity(test)
+                        && (!measurement.row.redacted
+                            || measurement.compare_radio_fields(test).0 != "conflicting")
+                    {
+                        possible_chains.push(measurement.row);
+                    }
+                }
             }
         }
         let mut chain_path_conflict = None;
@@ -562,8 +574,8 @@ pub(super) fn compare_checked(
                     matches.rows.extend(partials);
                 }
                 ChainPath::SplitAcrossPaths if matches.rows.is_empty() => {
-                    let possible_path = !unknown.rows.is_empty() && entry.is_some_and(|entry| {
-                        let possible = unknown.rows.iter().map(|&row| (row, possible_antenna_mask(row, required)));
+                    let possible_path = !possible_chains.is_empty() && entry.is_some_and(|entry| {
+                        let possible = possible_chains.iter().map(|&row| (row, possible_antenna_mask(row, required)));
                         matches!(
                             individual_chain_path(&entry.id, required, confirmed().chain(possible), graph, &mut chain_budget),
                             ChainPath::Matched(_) | ChainPath::Unknown
@@ -1310,6 +1322,24 @@ impl<'a> Measurement<'a> {
         }
     }
 
+    fn matches_radio_identity(&self, test: &TxTest) -> bool {
+        let device = self.row.device.split('#').next();
+        self.purpose() == test.purpose.as_deref()
+            && match test.technology.as_deref() {
+                Some("wifi") => {
+                    device == Some("DLLWIFI_TEST") && self.row.function != "TX_MULTI_VERIFY"
+                }
+                Some("bluetooth") => {
+                    device == Some("DLLIOT")
+                        && matches!(
+                            self.row.function.as_str(),
+                            "TX_MULTI_VERIFY" | "RX_VERIFY_PER"
+                        )
+                }
+                _ => false,
+            }
+    }
+
     fn is_candidate(&self, test: &TxTest) -> bool {
         if let Some(procedure) = &test.procedure {
             (self.row.device == procedure.device && self.row.function == procedure.function)
@@ -1424,6 +1454,11 @@ impl<'a> Measurement<'a> {
                 vec!["Redacted execution values cannot establish coverage.".into()],
             );
         }
+        self.compare_radio_fields(test)
+    }
+
+    fn compare_radio_fields(&self, test: &TxTest) -> (&'static str, Vec<String>) {
+        let bluetooth = test.technology.as_deref() == Some("bluetooth");
         let mut mismatches = Vec::new();
         let mut unknown = Vec::new();
         let mut partial = false;
@@ -1440,19 +1475,7 @@ impl<'a> Measurement<'a> {
                 "Specified dimensions are outside the audited Bluetooth/Wi-Fi profile.".into(),
             );
         }
-        let identity = self
-            .row
-            .device
-            .split_once('#')
-            .map_or(self.row.device.as_str(), |(base, _)| base);
-        if identity != if bluetooth { "DLLIOT" } else { "DLLWIFI_TEST" }
-            || bluetooth
-                && !matches!(
-                    self.row.function.as_str(),
-                    "TX_MULTI_VERIFY" | "RX_VERIFY_PER"
-                )
-            || !bluetooth && self.row.function == "TX_MULTI_VERIFY"
-            || self.purpose() != test.purpose.as_deref()
+        if !self.matches_radio_identity(test)
             || self.row.redacted
             || self.row.reachability != "reachable"
         {

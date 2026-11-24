@@ -6339,6 +6339,24 @@ async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Resul
     assert_eq!(report["coverage"][0]["status"], "unknown");
     assert_eq!(report["status"], "incomplete");
     assert_eq!(report["ready_for_review"], false);
+    let mut rx_bridge = args.clone();
+    let maybe = text
+        .lines()
+        .find(|line| line.starts_with("MAYBE="))
+        .unwrap_or_default();
+    replace_plan_script(
+        &mut rx_bridge,
+        maybe,
+        "MAYBE=\"DLLWIFI_TEST|RX_VERIFY_PER|BAND=6G&ANT=2&STANDARD=11AG&FREQ=6115&BW=20&DATA_RATE=OFDM6&RX_TARGET_POWER=-80dBm&FRAME_COUNT=500|PER=<10%|1|QUIT|FAIL\"",
+    );
+    let report = plan_report(rx_bridge).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert_eq!(
+        report["validation"]["execution"][3]["function"],
+        "RX_VERIFY_PER"
+    );
+    assert_eq!(report["coverage"][0]["status"], "conflicting");
+    assert_eq!(report["status"], "invalid");
     replace_plan_script(
         &mut args,
         "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=2",
