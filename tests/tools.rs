@@ -8073,7 +8073,21 @@ async fn bundle_budgets_fallthrough_and_unsupported_macros_keep_honest_execution
 async fn bundle_reports_resolved_branch_label_ambiguity_like_literal() -> Result<()> {
     use serde_json::json;
 
-    for pass_path in ["B", "*V:Routes-After#"] {
+    for (pass_path, destination, status, code) in [
+        ("B", "B", "incomplete", "BRANCH_LABEL_AMBIGUOUS"),
+        (
+            "*V:Routes-After#",
+            "B",
+            "incomplete",
+            "BRANCH_LABEL_AMBIGUOUS",
+        ),
+        (
+            "*V:Routes-After#",
+            "ABSENT",
+            "invalid",
+            "BRANCH_TARGET_MISSING",
+        ),
+    ] {
         let text = format!(
             concat!(
                 "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
@@ -8087,19 +8101,17 @@ async fn bundle_reports_resolved_branch_label_ambiguity_like_literal() -> Result
         arguments["files"]
             .as_array_mut()
             .ok_or_else(|| script_audit_mcp::Error::Knowledge("fixture files missing".into()))?
-            .push(json!({"name":"SETTINGS.ini","text":"[Routes]\nAfter=B\n"}));
+            .push(json!({"name":"SETTINGS.ini","text":format!("[Routes]\nAfter={destination}\n")}));
         let report = bundle_report(arguments).await?;
-        assert_eq!(report["execution"][0]["pass_path"], "B", "{pass_path}");
+        let case = format!("{pass_path} -> {destination}");
+        assert_eq!(report["execution"][0]["pass_path"], destination, "{case}");
         let diagnostics = report["diagnostics"].as_array().ok_or_else(|| {
             script_audit_mcp::Error::Knowledge("missing bundle diagnostics".into())
         })?;
         let codes: Vec<_> = diagnostics.iter().map(|issue| &issue["code"]).collect();
-        assert_eq!(codes, ["BRANCH_LABEL_AMBIGUOUS"], "{pass_path}");
-        assert_eq!(
-            report["layers"]["control_flow"], "incomplete",
-            "{pass_path}"
-        );
-        assert_eq!(report["status"], "incomplete", "{pass_path}");
+        assert_eq!(codes, [code], "{case}");
+        assert_eq!(report["layers"]["control_flow"], status, "{case}");
+        assert_eq!(report["status"], status, "{case}");
     }
     Ok(())
 }
