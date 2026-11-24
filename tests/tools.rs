@@ -557,6 +557,139 @@ fn unknown_criteria_are_preserved_with_warnings() -> Result<()> {
 }
 
 #[test]
+fn validate_line_rejects_malformed_references_in_unknown_criteria() -> Result<()> {
+    let report = fixture().validate_line(
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|EXTRA=*V:Unclosed|10|NEXT|FAIL|",
+        None,
+    )?;
+    assert_eq!(report.status, ValidationStatus::Invalid);
+    assert!(report.diagnostics.iter().any(|issue| {
+        issue.field == "criteria.EXTRA"
+            && issue.code == "invalid_reference"
+            && issue.severity == script_audit_mcp::model::Severity::Error
+    }));
+    Ok(())
+}
+
+#[test]
+fn compose_line_rejects_malformed_references_in_unknown_criteria() {
+    let mut request = wifi_request();
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "EXTRA".into(),
+        Value::Single("*V:Unclosed".into()),
+    )]));
+    let result = fixture().compose_line(request);
+    assert!(
+        matches!(&result, Err(script_audit_mcp::Error::Validation(issues))
+        if issues.iter().any(|issue| {
+            issue.field == "criteria.EXTRA"
+                && issue.code == "invalid_reference"
+                && issue.severity == script_audit_mcp::model::Severity::Error
+        })),
+        "must not emit a line with an unclosed reference: {result:?}"
+    );
+}
+
+#[test]
+fn valid_references_in_unknown_criteria_are_warning_only() -> Result<()> {
+    let engine = fixture();
+    for value in ["*V:Closed#", "*E:Runtime"] {
+        let mut request = wifi_request();
+        request.criteria = CriteriaInput::Named(BTreeMap::from([(
+            "EXTRA".into(),
+            Value::Single(value.into()),
+        )]));
+        let result = engine.compose_line(request)?;
+        assert!(result.line.contains(&format!("|EXTRA={value}|")));
+        assert!(result.warnings.iter().any(|issue| {
+            issue.field == "criteria.EXTRA" && issue.code == "unknown_criteria_key"
+        }));
+        assert_eq!(
+            engine.validate_line(&result.line, None)?.status,
+            ValidationStatus::Valid
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn compose_line_preserves_runtime_operands_in_unknown_criteria_lists() -> Result<()> {
+    let mut request = wifi_request();
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "EXTRA".into(),
+        Value::Multiple(vec!["1".into(), "*I:Limit".into()]),
+    )]));
+    let result = fixture().compose_line(request)?;
+    assert!(result.line.contains("|EXTRA=1,*I:Limit|"));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "unknown_criteria_key")
+    );
+    assert_eq!(
+        fixture().validate_line(&result.line, None)?.status,
+        ValidationStatus::Valid
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_line_preserves_references_in_unknown_criteria_lists() -> Result<()> {
+    let engine = fixture();
+    for value in ["1,*I:Limit", "*V:Outer-*V:Left,Right##,*I:Limit"] {
+        let line =
+            format!("DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|EXTRA={value}|10|NEXT|FAIL|");
+        let report = engine.validate_line(&line, None)?;
+        assert_eq!(
+            report.status,
+            ValidationStatus::Valid,
+            "{value}: {:?}",
+            report.diagnostics
+        );
+        assert!(report.diagnostics.iter().any(|issue| {
+            issue.field == "criteria.EXTRA" && issue.code == "runtime_reference_unchecked"
+        }));
+    }
+    Ok(())
+}
+
+#[test]
+fn compose_line_rejects_references_spanning_unknown_criteria_array_items() {
+    for tail in ["B#", "B"] {
+        let mut request = wifi_request();
+        request.criteria = CriteriaInput::Named(BTreeMap::from([(
+            "EXTRA".into(),
+            Value::Multiple(vec!["*V:A".into(), tail.into()]),
+        )]));
+        let result = fixture().compose_line(request);
+        assert!(
+            matches!(&result, Err(script_audit_mcp::Error::Validation(issues))
+                if issues.iter().filter(|issue| {
+                    issue.field == "criteria.EXTRA" && issue.code == "invalid_reference"
+                }).count() == 1),
+            "expected one invalid_reference for an unclosed array item: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_line_accepts_comma_inside_unknown_criterion_reference() -> Result<()> {
+    let report = fixture().validate_line(
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|EXTRA=*V:A,B#|10|NEXT|FAIL|",
+        None,
+    )?;
+    assert_eq!(report.status, ValidationStatus::Valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|issue| issue.code == "bundle_reference_unchecked")
+    );
+    Ok(())
+}
+
+#[test]
 fn historical_widths_preserve_all_fields_and_warn() -> Result<()> {
     for line in [
         "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL",
