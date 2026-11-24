@@ -6749,6 +6749,39 @@ async fn bundle_report(arguments: serde_json::Value) -> Result<serde_json::Value
 }
 
 #[cfg(feature = "mcp")]
+#[tokio::test]
+async fn bundle_catalog_reports_the_input_field_to_fix() -> Result<()> {
+    for (device, function, scope, code, field) in [
+        ("SSH#QUICK", "OPEN", None, "invalid_input", "device"),
+        ("SSH", "OPEN", Some(" SSH"), "invalid_input", "device_scope"),
+        ("SSH", "MISSING", None, "unknown_function", "function"),
+    ] {
+        let text = format!(
+            "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"{device}|{function}|host|NULL|100|QUIT|FAIL\"\n"
+        );
+        let mut arguments = bundle_arguments(&text);
+        arguments["device_scope"] = serde_json::json!(scope);
+        let report = bundle_report(arguments).await?;
+        assert_eq!(report["status"], "invalid", "{report}");
+        let issue = report["diagnostics"]
+            .as_array()
+            .and_then(|issues| {
+                issues
+                    .iter()
+                    .find(|issue| issue["layer"] == "catalog" && issue["code"] == code)
+            })
+            .unwrap_or_else(|| panic!("missing {code} catalog diagnostic: {report}"));
+        assert_eq!(issue["field"], field, "{issue}");
+        assert_eq!(issue["severity"], "error");
+        assert_eq!(issue["file"], "MAIN_FLOW.ini");
+        assert_eq!(issue["line"], 4);
+        assert_eq!(issue["section"], "RUN");
+        assert_eq!(issue["row"], "A");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
 async fn bundle_report_with_snapshot(
     arguments: serde_json::Value,
     snapshot: Snapshot,
