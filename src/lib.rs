@@ -208,6 +208,7 @@ impl Engine {
                 return Ok(validation_report(segments, diagnostics));
             }
         };
+        let flow_fields_omitted = schema.function.convention == Some(2) && segments.len() == 5;
         match schema.function.convention {
             Some(1) if segments.len() != 5 => diagnostics.push(grammar::diagnostic(
                 "line",
@@ -215,7 +216,7 @@ impl Engine {
                 "convention 1 requires exactly five fields",
                 Severity::Error,
             )),
-            Some(2) if segments.len() == 5 => diagnostics.push(grammar::diagnostic(
+            Some(2) if flow_fields_omitted => diagnostics.push(grammar::diagnostic(
                 "line",
                 "field_count",
                 "convention 2 requires flow fields",
@@ -266,7 +267,13 @@ impl Engine {
         }
         match grammar::compose(&schema, &request, timeout_overflowed) {
             Ok(result) => diagnostics.extend(result.warnings),
-            Err(Error::Validation(issues)) => diagnostics.extend(issues),
+            Err(Error::Validation(issues)) => {
+                diagnostics.extend(issues.into_iter().filter(|issue| {
+                    !(flow_fields_omitted
+                        && issue.code == "required"
+                        && matches!(issue.field.as_str(), "pass_path" | "fail_path"))
+                }))
+            }
             Err(error) => diagnostics.push(grammar::diagnostic(
                 "line",
                 "unsupported_grammar",

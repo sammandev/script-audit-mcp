@@ -402,6 +402,44 @@ fn validate_line_checks_eight_fields_without_losing_trailing_empty_field() -> Re
 }
 
 #[test]
+fn validate_line_reports_omitted_convention_2_flow_fields_once() -> Result<()> {
+    let report =
+        fixture().validate_line("DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|100", None)?;
+    assert_eq!(report.status, ValidationStatus::Invalid);
+    assert_eq!(report.diagnostics.len(), 1, "{:?}", report.diagnostics);
+    let issue = &report.diagnostics[0];
+    assert_eq!(issue.field, "line");
+    assert_eq!(issue.code, "field_count");
+    assert_eq!(issue.message, "convention 2 requires flow fields");
+    Ok(())
+}
+
+#[test]
+fn validate_line_reports_blank_convention_2_flow_targets_by_field() -> Result<()> {
+    let engine = fixture();
+    for (flow, expected) in [
+        ("|NEXT||", vec!["fail_path"]),
+        ("||FAIL|", vec!["pass_path"]),
+        ("|||", vec!["pass_path", "fail_path"]),
+    ] {
+        let line = format!("DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|100{flow}");
+        let report = engine.validate_line(&line, None)?;
+        assert_eq!(report.status, ValidationStatus::Invalid, "{line}");
+        let actual: Vec<_> = report
+            .diagnostics
+            .iter()
+            .map(|issue| (issue.field.as_str(), issue.code.as_str()))
+            .collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|field| (field, "required"))
+            .collect();
+        assert_eq!(actual, expected, "{line}");
+    }
+    Ok(())
+}
+
+#[test]
 fn validate_line_reports_timeout_overflow() -> Result<()> {
     let engine = fixture();
     for (function, timeout, expected_message) in [
