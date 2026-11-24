@@ -125,8 +125,13 @@ impl McpServer {
         Parameters(request): Parameters<ComposeRequest>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let (device, name) = (request.device.clone(), request.function.clone());
-        self.invoke_function(device, name, move |engine| engine.compose_line(request))
-            .await
+        self.invoke_function_with(
+            device,
+            name,
+            |catalog, device, name| catalog.function_snapshot_without_examples(device, name),
+            move |engine| engine.compose_line(request),
+        )
+        .await
     }
 
     #[tool(
@@ -192,7 +197,11 @@ impl McpServer {
             Ok(request) => request,
             Err(error) => return Ok(domain_error(error)),
         };
-        self.invoke(move |engine| request.compare(&engine)).await
+        self.invoke_on(
+            |catalog| catalog.snapshot_without_examples(),
+            move |engine| request.compare(&engine),
+        )
+        .await
     }
 
     #[tool(
