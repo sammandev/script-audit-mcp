@@ -140,6 +140,9 @@ impl PostgresCatalog {
         let Ok((source, interface)) = crate::device_target(device) else {
             return self.read(SnapshotScope::Full, examples);
         };
+        if interface.contains('\0') || name.contains('\0') {
+            return Ok(Snapshot::default());
+        }
         self.read(
             SnapshotScope::Function {
                 source,
@@ -748,6 +751,90 @@ mod tests {
                 "diagnostics": []
             }}))
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn postgres_nul_names_report_unknown_function() -> Result<()> {
+        use crate::mcp::{GetFunctionRequest, McpServer, ValidateLineRequest};
+        use crate::model::ComposeRequest;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let fixture = Fixture::new()?;
+        let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let get = |device: &str, name: &str| {
+            runtime.block_on(server.get_function(Parameters(GetFunctionRequest {
+                device: device.into(),
+                name: name.into(),
+                device_scope: None,
+            })))
+        };
+        for (device, name) in [("SSH", "SE\0NDSTR"), ("SS\0H", "SENDSTR")] {
+            let result = get(device, name).map_err(|error| Error::Knowledge(error.to_string()))?;
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(
+                result
+                    .structured_content
+                    .as_ref()
+                    .map(|value| &value["error"]["code"]),
+                Some(&serde_json::json!("unknown_function")),
+                "{device:?}/{name:?}"
+            );
+        }
+
+        let compose = |device: &str, function: &str| {
+            runtime.block_on(server.compose_line(Parameters(ComposeRequest {
+                device: device.into(),
+                function: function.into(),
+                params: Default::default(),
+                device_scope: None,
+                criteria: Default::default(),
+                param_sections: Vec::new(),
+                criteria_sections: Vec::new(),
+                timeout: 1,
+                pass_path: None,
+                fail_path: None,
+                error_code: None,
+            })))
+        };
+        for (device, function) in [("SSH", "SE\0NDSTR"), ("SS\0H", "SENDSTR")] {
+            let result =
+                compose(device, function).map_err(|error| Error::Knowledge(error.to_string()))?;
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(
+                result
+                    .structured_content
+                    .as_ref()
+                    .map(|value| &value["error"]["code"]),
+                Some(&serde_json::json!("unknown_function")),
+                "{device:?}/{function:?}"
+            );
+        }
+
+        let validate = |line: &str| {
+            runtime.block_on(server.validate_line(Parameters(ValidateLineRequest {
+                line: line.into(),
+                device_scope: None,
+            })))
+        };
+        for line in ["SSH|SE\0NDSTR|x|NULL|1", "SS\0H|SENDSTR|x|NULL|1"] {
+            let result = validate(line).map_err(|error| Error::Knowledge(error.to_string()))?;
+            assert_ne!(result.is_error, Some(true));
+            let diagnostics = result
+                .structured_content
+                .as_ref()
+                .map(|value| &value["diagnostics"])
+                .and_then(|value| value.as_array());
+            assert!(
+                diagnostics.is_some_and(|diagnostics| diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == "unknown_function")),
+                "{line:?}: {result:?}"
+            );
+        }
         Ok(())
     }
 
