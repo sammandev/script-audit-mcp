@@ -15,7 +15,7 @@ export PGPASSWORD
 
 `SCRIPT_AUDIT_DATABASE_URL` takes precedence over `DATABASE_URL`. `PGPASSWORD` supplies the password when absent from the URL; embedded URL passwords must be percent-encoded. Set `PGSSLROOTCERT` for a private PEM CA. TLS is certificate-verified by default; plaintext requires explicit `sslmode=disable`. The native-TLS client also keeps certificate verification enabled for `sslmode=require`.
 
-The old `--db` argument and `SCRIPT_FORGE_DB` file configuration are removed. Missing configuration, connection failures, and incompatible schemas fail startup. `--help` writes usage to stderr; stdout is reserved for MCP messages. Every request reads the six catalog tables in a read-only repeatable-read transaction on a blocking worker. Use a SELECT-only database login as a second write barrier.
+The old `--db` argument and `SCRIPT_FORGE_DB` file configuration are removed. Missing configuration, connection failures, and incompatible schemas fail startup. `--help` writes usage to stderr; stdout is reserved for MCP messages. Tool calls that read the catalog do so in a read-only repeatable-read transaction on a blocking worker. Use a SELECT-only database login as a second write barrier.
 
 ### PostgreSQL contract tests
 
