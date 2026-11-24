@@ -7985,6 +7985,59 @@ async fn bundle_reports_single_slash_rows_as_invalid_comments() -> Result<()> {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn compose_flow_anchor_accepts_case_only_header_variant() -> Result<()> {
+    let mut arguments = reviewed_composition_arguments().await?;
+    let main = arguments["comparison"]["bundle"]["files"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .replace("[TEST FLOW:Normal]", "[test flow:NORMAL]");
+    arguments["comparison"]["bundle"]["files"][0]["text"] = main.into();
+    let arguments = bind_composition_review(arguments).await?;
+    let report = compose_report(arguments).await?;
+    assert!(
+        report["draft_files"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(
+                "[test flow:NORMAL]\r\n; INSERT TX HERE\r\nTX_DRAFT_0=\"TX_DRAFT_0\"\r\n"
+            )),
+        "composition blockers: {}",
+        report["blockers"]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn compose_flow_anchor_rejects_a_different_flow_header() -> Result<()> {
+    let mut arguments = reviewed_composition_arguments().await?;
+    let main = arguments["comparison"]["bundle"]["files"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .replace(
+            "; INSERT TX HERE",
+            "[TEST FLOW:Sampling]\r\n; INSERT TX HERE",
+        );
+    arguments["comparison"]["bundle"]["files"][0]["text"] = main.into();
+    let arguments = bind_composition_review(arguments).await?;
+    let report = compose_report(arguments).await?;
+    assert_eq!(report["diffs"], serde_json::json!([]), "{report}");
+    assert!(
+        report["blockers"]
+            .as_array()
+            .is_some_and(
+                |blockers| blockers
+                    .iter()
+                    .any(|blocker| blocker.as_str().is_some_and(|message| {
+                        message.contains("composition needs a unique selected-flow comment anchor")
+                    }))
+            ),
+        "{report}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn compose_accepts_double_slash_flow_anchor() -> Result<()> {
     let mut arguments = reviewed_composition_arguments().await?;
     let main = arguments["comparison"]["bundle"]["files"][0]["text"]
