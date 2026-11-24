@@ -1,6 +1,7 @@
 use std::{
     cell::OnceCell,
     collections::{BTreeMap, HashMap},
+    sync::LazyLock,
 };
 
 use regex::Regex;
@@ -93,7 +94,13 @@ pub(crate) fn bundle_profile(function: &Function) -> Option<Encoding> {
 }
 
 pub(crate) fn support_issues(schema: &FunctionSchema) -> Vec<Diagnostic> {
-    support_issues_for(schema, None)
+    support_issues_for(schema, SupportMode::Line)
+}
+
+enum SupportMode<'a> {
+    Line,
+    Listing(&'a mut LineSyntaxCache),
+    Bundle(&'a BundleGrammar),
 }
 
 pub(crate) struct BundleGrammar {
@@ -120,7 +127,7 @@ impl BundleGrammar {
             parameters: syntax(&schema.parameters),
             criteria: syntax(&schema.criteria),
         };
-        grammar.support_issues = support_issues_for(schema, Some(&grammar));
+        grammar.support_issues = support_issues_for(schema, SupportMode::Bundle(&grammar));
         grammar
     }
 
@@ -191,11 +198,14 @@ impl BundleGrammar {
     }
 }
 
-fn support_issues_for(schema: &FunctionSchema, grammar: Option<&BundleGrammar>) -> Vec<Diagnostic> {
-    let bundle = grammar.is_some();
+fn support_issues_for(schema: &FunctionSchema, mut mode: SupportMode<'_>) -> Vec<Diagnostic> {
+    let bundle = matches!(mode, SupportMode::Bundle(_));
     let mut issues = Vec::new();
-    let Some(encoding) = grammar.map_or_else(|| profile(&schema.function), BundleGrammar::encoding)
-    else {
+    let encoding = match &mode {
+        SupportMode::Line | SupportMode::Listing(_) => profile(&schema.function),
+        SupportMode::Bundle(grammar) => grammar.encoding(),
+    };
+    let Some(encoding) = encoding else {
         return vec![diagnostic(
             "function",
             "unsupported_grammar",
@@ -305,10 +315,16 @@ fn support_issues_for(schema: &FunctionSchema, grammar: Option<&BundleGrammar>) 
                 ));
             }
             let local = FieldSyntax::default();
-            let syntax = grammar
-                .and_then(|grammar| grammar.syntax(prefix == "criteria").get(&field.name))
-                .unwrap_or(&local);
-            if let Err(message) = syntax.pattern(definition) {
+            let (pattern_error, allowed_error) = match &mut mode {
+                SupportMode::Line => local.errors(definition),
+                SupportMode::Listing(cache) => cache.errors(definition),
+                SupportMode::Bundle(grammar) => grammar
+                    .syntax(prefix == "criteria")
+                    .get(&field.name)
+                    .unwrap_or(&local)
+                    .errors(definition),
+            };
+            if let Some(message) = pattern_error {
                 issues.push(diagnostic(
                     &key,
                     "unsupported_pattern",
@@ -316,7 +332,7 @@ fn support_issues_for(schema: &FunctionSchema, grammar: Option<&BundleGrammar>) 
                     Severity::Incomplete,
                 ));
             }
-            if let Err(message) = syntax.allowed(definition) {
+            if let Some(message) = allowed_error {
                 issues.push(diagnostic(
                     &key,
                     "unsupported_constraint",
@@ -969,12 +985,44 @@ pub(crate) fn split_section_references(raw: &str) -> (String, Vec<String>) {
 }
 
 #[derive(Default)]
+pub(crate) struct LineSyntaxCache {
+    patterns: HashMap<(String, bool), Option<String>>,
+    constraints: HashMap<String, Option<String>>,
+}
+
+impl LineSyntaxCache {
+    pub(crate) fn support_issues(&mut self, schema: &FunctionSchema) -> Vec<Diagnostic> {
+        support_issues_for(schema, SupportMode::Listing(self))
+    }
+
+    fn errors(&mut self, definition: &Definition) -> (Option<&String>, Option<&String>) {
+        // Listings only need compile verdicts, not the compiled matchers.
+        let pattern = self
+            .patterns
+            .entry((definition.value_pattern.clone(), is_multiple(definition)))
+            .or_insert_with_key(|(template, multiple)| compile_pattern(template, *multiple).err());
+        let constraint = self
+            .constraints
+            .entry(definition.allowed_values.clone())
+            .or_insert_with_key(|constraint| allowed(constraint).err());
+        (pattern.as_ref(), constraint.as_ref())
+    }
+}
+
+#[derive(Default)]
 struct FieldSyntax {
     pattern: OnceCell<std::result::Result<Regex, String>>,
     allowed: OnceCell<std::result::Result<Allowed, String>>,
 }
 
 impl FieldSyntax {
+    fn errors(&self, definition: &Definition) -> (Option<&String>, Option<&String>) {
+        (
+            self.pattern(definition).as_ref().err(),
+            self.allowed(definition).as_ref().err(),
+        )
+    }
+
     fn pattern(&self, definition: &Definition) -> &std::result::Result<Regex, String> {
         self.pattern.get_or_init(|| pattern(definition))
     }
@@ -1000,7 +1048,7 @@ fn validate_value(
     let Some(definition) = &field.definition else {
         return values.join(",");
     };
-    let multi = definition.cardinality == "MULTIPLE" || definition.kind == "list[int]";
+    let multi = is_multiple(definition);
     if multi != matches!(value, Value::Multiple(_)) || values.is_empty() {
         issues.push(diagnostic(
             key,
@@ -1134,28 +1182,33 @@ fn validate_value(
     values.join(",")
 }
 
+fn is_multiple(definition: &Definition) -> bool {
+    definition.cardinality == "MULTIPLE" || definition.kind == "list[int]"
+}
+
 fn pattern(definition: &Definition) -> std::result::Result<Regex, String> {
-    let original = definition.value_pattern.trim();
+    compile_pattern(&definition.value_pattern, is_multiple(definition))
+}
+
+fn compile_pattern(template: &str, multi: bool) -> std::result::Result<Regex, String> {
+    let original = template.trim();
     if original.is_empty() {
         return Err("value_pattern is missing".into());
     }
     let alternatives = original
         .lines()
-        .map(|template| pattern_expression(definition, template.trim()))
+        .map(|template| pattern_expression(template.trim(), multi))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Regex::new(&format!("\\A(?:{})\\z", alternatives.join("|"))).map_err(|error| error.to_string())
 }
 
-fn pattern_expression(
-    definition: &Definition,
-    original: &str,
-) -> std::result::Result<String, String> {
+fn pattern_expression(original: &str, multi: bool) -> std::result::Result<String, String> {
+    static REPETITION: LazyLock<std::result::Result<Regex, regex::Error>> =
+        LazyLock::new(|| Regex::new(r"^<[^<>]+>(?:,\s*<[^<>]+>)+,?\s*(?:\.{3}|\u{2026})$"));
     if original.is_empty() {
         return Err("pattern alternatives must be nonempty".into());
     }
-    let repetition = Regex::new(r"^<[^<>]+>(?:,\s*<[^<>]+>)+,?\s*(?:\.{3}|\u{2026})$")
-        .map_err(|error| error.to_string())?;
-    let multi = definition.cardinality == "MULTIPLE" || definition.kind == "list[int]";
+    let repetition = REPETITION.as_ref().map_err(ToString::to_string)?;
     let source = if repetition.is_match(original) {
         if !multi {
             return Err("a repeated template requires MULTIPLE cardinality".into());
@@ -1201,6 +1254,8 @@ enum Allowed {
 }
 
 fn allowed(raw: &str) -> std::result::Result<Allowed, String> {
+    static CHARACTER_CLASS: LazyLock<std::result::Result<Regex, regex::Error>> =
+        LazyLock::new(|| Regex::new(r"^\[(?:[A-Za-z0-9](?:-[A-Za-z0-9])?)+\]$"));
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(Allowed::Any);
@@ -1235,8 +1290,7 @@ fn allowed(raw: &str) -> std::result::Result<Allowed, String> {
             return Ok(Allowed::Range(lower, upper));
         }
     }
-    let character_class = Regex::new(r"^\[(?:[A-Za-z0-9](?:-[A-Za-z0-9])?)+\]$")
-        .map_err(|error| error.to_string())?;
+    let character_class = CHARACTER_CLASS.as_ref().map_err(ToString::to_string)?;
     if character_class.is_match(raw) {
         return Regex::new(&format!("\\A{raw}+\\z"))
             .map(Allowed::Characters)

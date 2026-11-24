@@ -414,6 +414,7 @@ impl Engine {
                 .and_modify(|unique| *unique = None)
                 .or_insert(Some(function));
         }
+        let mut syntax = grammar::LineSyntaxCache::default();
         let mut functions: Vec<_> = self
             .snapshot
             .functions
@@ -439,8 +440,8 @@ impl Engine {
                             .flatten()
                     })
                     .filter(|resolved| grammar::profile(resolved).is_some())
-                    .and_then(|resolved| self.function_schema(resolved, None).ok())
-                    .is_some_and(|schema| schema.function.composition_supported);
+                    .and_then(|resolved| self.linked_schema(resolved, None).ok())
+                    .is_some_and(|schema| syntax.support_issues(&schema).is_empty());
                 function
             })
             .collect();

@@ -176,6 +176,83 @@ fn list_functions_preserves_script_device_resolution_for_support() -> Result<()>
 }
 
 #[test]
+fn list_functions_keeps_scoped_syntax_and_key_audits_separate() -> Result<()> {
+    use script_audit_mcp::model::{AuditedGrammar, ScriptKeyAudit};
+
+    let mut snapshot = Snapshot::default();
+    let repeated = "<first>,<second>,...";
+    for (interface, cardinality, value_pattern, allowed_values, audited) in [
+        ("A", "MULTIPLE", repeated, "[A-Z]", true),
+        ("B", "SINGLE", repeated, "[A-Z]", true),
+        ("C", "MULTIPLE", repeated, "letters", true),
+        ("D", "MULTIPLE", repeated, "[A-Z]", false),
+        ("E", "MULTIPLE", repeated, "[A-Z]", true),
+        ("F", "MULTIPLE", "[<optional>]", "[A-Z]", true),
+    ] {
+        snapshot.functions.push(Function {
+            source: "DLL".into(),
+            interface: interface.into(),
+            name: "OP".into(),
+            convention: Some(2),
+            audited_grammar: Some(AuditedGrammar {
+                encoding: "named".into(),
+                scope: "line".into(),
+                script_keys: if audited {
+                    vec![ScriptKeyAudit {
+                        criterion: false,
+                        name: "VALUE".into(),
+                        scope: "line".into(),
+                    }]
+                } else {
+                    vec![]
+                },
+            }),
+            ..Function::default()
+        });
+        snapshot.parameter_links.push(Link {
+            name: "VALUE".into(),
+            function_source: "DLL".into(),
+            function_name: "OP".into(),
+            device_name: interface.into(),
+            ..Link::default()
+        });
+        snapshot.parameter_definitions.push(Definition {
+            name: "VALUE".into(),
+            device_name: interface.into(),
+            kind: "string".into(),
+            cardinality: cardinality.into(),
+            value_pattern: value_pattern.into(),
+            allowed_values: allowed_values.into(),
+            ..Definition::default()
+        });
+    }
+    let engine = Engine::new(snapshot);
+    let listed = engine.list_functions(None)?;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| (row.interface.as_str(), row.composition_supported))
+            .collect::<Vec<_>>(),
+        [
+            ("A", true),
+            ("B", false),
+            ("C", false),
+            ("D", false),
+            ("E", true),
+            ("F", false)
+        ]
+    );
+    for row in listed {
+        let schema = engine.get_function(&format!("DLL{}", row.interface), &row.name, None)?;
+        assert_eq!(
+            row.composition_supported,
+            schema.function.composition_supported
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn get_function_resolves_scoped_schema_and_preserves_examples() -> Result<()> {
     let schema = fixture().get_function("DLLWIFI_TEST#QUICK", "TX_MULTI_VERIFICATION", None)?;
     assert_eq!(schema.device_scope, "WIFI_TEST");
