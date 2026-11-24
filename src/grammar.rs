@@ -480,10 +480,7 @@ pub(crate) fn compose(schema: &FunctionSchema, request: &ComposeRequest) -> Resu
         }
         (CriteriaInput::Raw(value), Some(Encoding::Raw)) => {
             if let Some(field) = schema.criteria.first() {
-                let mut values = BTreeMap::new();
-                if value != NULL_CRITERION {
-                    values.insert(field.name.clone(), Value::Single(value.clone()));
-                }
+                let values = BTreeMap::from([(field.name.clone(), Value::Single(value.clone()))]);
                 emit_fields(&schema.criteria, &values, Encoding::Raw, true, &mut issues)
             } else if value.is_empty() || value == NULL_CRITERION {
                 String::new()
@@ -544,10 +541,14 @@ pub(crate) fn emit_fields(
     issues: &mut Vec<Diagnostic>,
 ) -> String {
     let prefix = if criteria { "criteria" } else { "params" };
+    let raw_criteria = criteria && encoding == Encoding::Raw;
     let mut parts = Vec::new();
     for field in fields {
         let key = format!("{prefix}.{}", field.name);
-        let Some(value) = values.get(&field.name) else {
+        let value = values
+            .get(&field.name)
+            .filter(|value| !raw_criteria || !is_null_criterion(field, value));
+        let Some(value) = value else {
             if field.required {
                 issues.push(diagnostic(
                     &key,
@@ -611,6 +612,18 @@ pub(crate) fn emit_fields(
         }
     }
     parts.join(if encoding == Encoding::Named { "&" } else { "" })
+}
+
+fn is_null_criterion(field: &Field, value: &Value) -> bool {
+    match value {
+        Value::Single(raw) => raw == NULL_CRITERION,
+        Value::Multiple(values) => {
+            matches!(values.as_slice(), [raw] if raw == NULL_CRITERION)
+                && field.definition.as_ref().is_some_and(|definition| {
+                    definition.cardinality == "MULTIPLE" || definition.kind == "list[int]"
+                })
+        }
+    }
 }
 
 fn section_fields(
