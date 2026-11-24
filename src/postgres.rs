@@ -254,8 +254,7 @@ impl PostgresCatalog {
                 })
             },
         )?;
-        let device_only = matches!(scope, SnapshotScope::Device { .. });
-        if device_only && functions.is_empty() {
+        if !matches!(scope, SnapshotScope::Full) && functions.is_empty() {
             transaction.commit()?;
             return Ok(Snapshot::default());
         }
@@ -717,6 +716,37 @@ mod tests {
                 .as_ref()
                 .map(|value| &value["examples"][0]["script"]),
             Some(&serde_json::json!("SSH|SENDSTR|payload|NULL|1"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn postgres_get_function_miss_skips_remaining_catalog_reads() -> Result<()> {
+        use crate::mcp::{GetFunctionRequest, McpServer};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let fixture = Fixture::new()?;
+        let mut connection = fixture.catalog.connect()?;
+        connection.batch_execute(
+            "ALTER TABLE parameter_definitions RENAME TO parameter_definitions_data",
+        )?;
+        let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
+        let result = tokio::runtime::Runtime::new()?
+            .block_on(server.get_function(Parameters(GetFunctionRequest {
+                device: "SSH".into(),
+                name: "MISSING".into(),
+                device_scope: None,
+            })))
+            .map_err(|error| Error::Knowledge(error.to_string()))?;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"error": {
+                "code": "unknown_function",
+                "message": "unknown function: SSH/MISSING",
+                "diagnostics": []
+            }}))
         );
         Ok(())
     }
