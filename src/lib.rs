@@ -63,8 +63,8 @@ pub type Result<Value> = std::result::Result<Value, Error>;
 pub trait Catalog: Send + Sync {
     fn snapshot(&self) -> Result<Snapshot>;
 
-    /// A snapshot holding the rows needed by `Engine::list_functions(None)`.
-    fn listing_snapshot(&self) -> Result<Snapshot> {
+    /// A full snapshot that may omit Examples, for operations that never return them.
+    fn snapshot_without_examples(&self) -> Result<Snapshot> {
         self.snapshot()
     }
 
@@ -76,6 +76,11 @@ pub trait Catalog: Send + Sync {
     /// A snapshot holding at least every row `Engine::get_function(device, name, _)` reads.
     fn function_snapshot(&self, _device: &str, _name: &str) -> Result<Snapshot> {
         self.snapshot()
+    }
+
+    /// Like `function_snapshot`, but may omit Examples.
+    fn function_snapshot_without_examples(&self, device: &str, name: &str) -> Result<Snapshot> {
+        self.function_snapshot(device, name)
     }
 }
 
