@@ -314,6 +314,46 @@ impl Engine {
         function: &Function,
         device_scope: Option<&str>,
     ) -> Result<FunctionSchema> {
+        let mut schema = self.linked_schema(function, device_scope)?;
+        schema.examples = self
+            .snapshot
+            .examples
+            .iter()
+            .filter(|example| {
+                if example.function_source != function.source
+                    || example.function_name != function.name
+                {
+                    return false;
+                }
+                if !example.device_name.is_empty()
+                    && !example
+                        .device_name
+                        .eq_ignore_ascii_case(&schema.device_scope)
+                    && !example
+                        .device_name
+                        .eq_ignore_ascii_case(&function.interface)
+                {
+                    return false;
+                }
+                let mut segments = example.script.split('|');
+                let (Some(device), Some(name)) = (segments.next(), segments.next()) else {
+                    return false;
+                };
+                self.resolve_function(device, name)
+                    .is_ok_and(|resolved| std::ptr::eq(resolved, function))
+            })
+            .cloned()
+            .collect();
+        schema.diagnostics = grammar::support_issues(&schema);
+        schema.function.composition_supported = schema.diagnostics.is_empty();
+        Ok(schema)
+    }
+
+    fn linked_schema(
+        &self,
+        function: &Function,
+        device_scope: Option<&str>,
+    ) -> Result<FunctionSchema> {
         let scope = device_scope
             .unwrap_or(&function.interface)
             .to_ascii_uppercase();
@@ -337,44 +377,14 @@ impl Engine {
             function,
             &scope,
         )?;
-        let examples = self
-            .snapshot
-            .examples
-            .iter()
-            .filter(|example| {
-                if example.function_source != function.source
-                    || example.function_name != function.name
-                {
-                    return false;
-                }
-                if !example.device_name.is_empty()
-                    && !example.device_name.eq_ignore_ascii_case(&scope)
-                    && !example
-                        .device_name
-                        .eq_ignore_ascii_case(&function.interface)
-                {
-                    return false;
-                }
-                let mut segments = example.script.split('|');
-                let (Some(device), Some(name)) = (segments.next(), segments.next()) else {
-                    return false;
-                };
-                self.resolve_function(device, name)
-                    .is_ok_and(|resolved| std::ptr::eq(resolved, function))
-            })
-            .cloned()
-            .collect();
-        let mut schema = FunctionSchema {
+        Ok(FunctionSchema {
             function: function.clone(),
             device_scope: scope,
             parameters,
             criteria,
-            examples,
+            examples: Vec::new(),
             diagnostics: Vec::new(),
-        };
-        schema.diagnostics = grammar::support_issues(&schema);
-        schema.function.composition_supported = schema.diagnostics.is_empty();
-        Ok(schema)
+        })
     }
 
     fn resolve_function(&self, device: &str, name: &str) -> Result<&Function> {

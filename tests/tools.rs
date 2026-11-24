@@ -7408,6 +7408,47 @@ async fn bundle_catalog_orphans_and_unsupported_knowledge_never_pass_or_fill_def
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn bundle_catalog_reused_schema_keeps_diagnostics_row_specific() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.criteria_definitions[0].value_pattern = "[<optional>]".into();
+    let text = concat!(
+        "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
+        "A=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|NEXT|FAIL\"\n",
+        "B=\"DLLwifi_test#QUICK|tx_multi_verification|ANT=999|NULL|1|NEXT|FAIL\"\n",
+        "C=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=2|POWER=5dB|1|NEXT|FAIL\"\n",
+        "D=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|QUIT|FAIL\"\n",
+    );
+    let report = bundle_report_with_snapshot(bundle_arguments(text), snapshot).await?;
+    let issues: Vec<_> = report["diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|issue| issue["layer"] == "catalog")
+        .map(|issue| {
+            (
+                issue["row"].as_str(),
+                issue["field"].as_str(),
+                issue["code"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        issues,
+        [
+            (Some("B"), Some("params.ANT"), Some("allowed_values")),
+            (
+                Some("C"),
+                Some("criteria.POWER"),
+                Some("unsupported_pattern"),
+            ),
+        ],
+        "{report}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_catalog_schema_uncertainty_preserves_assignment_errors() -> Result<()> {
     let mut snapshot = fixture_snapshot();
     snapshot

@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
 
 use crate::{
-    Engine, Error, grammar,
+    Engine, Error, device_target, function_lookup_key, grammar,
     model::{Diagnostic, Field, Severity},
 };
 
@@ -13,6 +13,7 @@ pub(super) fn validate(
     scope: Option<&str>,
     diagnostics: &mut Vec<BundleDiagnostic>,
 ) {
+    let mut schemas = HashMap::new();
     for row in execution {
         if row.device.eq_ignore_ascii_case("MACRO") {
             continue;
@@ -41,10 +42,41 @@ pub(super) fn validate(
             );
             continue;
         }
-        match engine.get_function(device, &row.function, scope) {
-            Ok(schema) => {
-                issues.extend(grammar::bundle_payload_support_issues(
-                    &schema,
+        let resolved = match device_target(device) {
+            Ok((source, interface)) => {
+                match schemas.entry(function_lookup_key(source, interface, &row.function)) {
+                    Entry::Occupied(cached) => Ok(cached.into_mut()),
+                    Entry::Vacant(slot) => {
+                        engine
+                            .resolve_function(device, &row.function)
+                            .map(|function| {
+                                slot.insert(
+                                    engine
+                                        .linked_schema(function, scope)
+                                        .map(|schema| {
+                                            let grammar = grammar::BundleGrammar::new(&schema);
+                                            (schema, grammar)
+                                        })
+                                        .map_err(|error| {
+                                            (grammar::bundle_profile(function), error)
+                                        }),
+                                )
+                            })
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let prepared = match &resolved {
+            Ok(entry) => entry
+                .as_ref()
+                .map_err(|(encoding, error)| (*encoding, error)),
+            Err(error) => Err((None, error)),
+        };
+        match prepared {
+            Ok((schema, grammar)) => {
+                issues.extend(grammar.payload_support_issues(
+                    schema,
                     &row.parameters,
                     &row.criteria,
                 ));
@@ -52,22 +84,11 @@ pub(super) fn validate(
                     (row.parameters.as_str(), schema.parameters.as_slice(), false),
                     (row.criteria.as_str(), schema.criteria.as_slice(), true),
                 ] {
-                    validate_payload(
-                        raw,
-                        fields,
-                        grammar::bundle_profile(&schema.function),
-                        criteria,
-                        &mut issues,
-                    );
+                    validate_payload(raw, fields, grammar, criteria, &mut issues);
                 }
             }
-            Err(error) => {
-                if engine
-                    .resolve_function(device, &row.function)
-                    .ok()
-                    .and_then(grammar::bundle_profile)
-                    == Some(grammar::Encoding::Named)
-                {
+            Err((encoding, error)) => {
+                if encoding == Some(grammar::Encoding::Named) {
                     for (raw, criteria) in [(&row.parameters, false), (&row.criteria, true)] {
                         for assignment in raw.split('&') {
                             validate_unresolved_assignment(assignment, criteria, &mut issues);
@@ -94,7 +115,7 @@ pub(super) fn validate(
                         }
                     }
                 }
-                let field = match &error {
+                let field = match error {
                     Error::InvalidInput { field, .. } => field.as_str(),
                     _ => "function",
                 };
@@ -138,13 +159,13 @@ pub(super) fn validate(
 fn validate_payload(
     raw: &str,
     fields: &[Field],
-    encoding: Option<grammar::Encoding>,
+    grammar: &grammar::BundleGrammar,
     criteria: bool,
     issues: &mut Vec<Diagnostic>,
 ) {
     let prefix = if criteria { "criteria" } else { "params" };
     let raw = if raw == "NULL" { "" } else { raw };
-    let Some(encoding) = encoding else {
+    let Some(encoding) = grammar.encoding() else {
         if raw.is_empty() {
             for field in fields.iter().filter(|field| field.required) {
                 issues.push(grammar::diagnostic(
@@ -266,7 +287,7 @@ fn validate_payload(
         );
         values
     };
-    grammar::emit_fields(&check_fields, &values, encoding, criteria, issues);
+    grammar.emit_fields(&check_fields, &values, encoding, criteria, issues);
 }
 
 fn validate_unresolved_assignment(assignment: &str, criteria: bool, issues: &mut Vec<Diagnostic>) {
