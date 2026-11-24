@@ -6339,6 +6339,24 @@ async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Resul
     assert_eq!(report["coverage"][0]["status"], "unknown");
     assert_eq!(report["status"], "incomplete");
     assert_eq!(report["ready_for_review"], false);
+    let execution_ids = |rows: &serde_json::Value| {
+        rows.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["execution_id"].as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        execution_ids(&report["coverage"][0]["evidence"]),
+        ["row:1", "row:2", "row:3"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(
+        execution_ids(&report["additional"]),
+        ["row:0"].into_iter().map(str::to_owned).collect()
+    );
     let mut rx_bridge = args.clone();
     let maybe = text
         .lines()

@@ -583,6 +583,9 @@ pub(super) fn compare_checked(
                     });
                     if possible_path {
                         chain_path_unknown = true;
+                        for row in partials {
+                            unknown.push(row, Vec::new());
+                        }
                         case.reasons.push("Unresolved measurements or the path budget leave single-path antenna-chain coverage unproven.".into());
                     } else {
                         let mut candidates = Candidates::default();
