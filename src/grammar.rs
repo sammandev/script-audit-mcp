@@ -678,10 +678,11 @@ fn emit_fields_with_syntax(
                     Severity::Error,
                 ));
             }
-            let raw = match value {
-                Value::Single(raw) => raw.clone(),
-                Value::Multiple(values) => values.join(","),
+            let values = match value {
+                Value::Single(raw) => std::slice::from_ref(raw),
+                Value::Multiple(values) => values.as_slice(),
             };
+            let raw = values.join(",");
             if raw.trim().is_empty() || raw.contains(['|', '\r', '\n', '&', '=']) {
                 issues.push(diagnostic(
                     &key,
@@ -690,7 +691,9 @@ fn emit_fields_with_syntax(
                     Severity::Error,
                 ));
             } else {
-                let _ = check_value_references(&raw, &key, issues);
+                for value in values {
+                    let _ = check_value_references(value, &key, issues);
+                }
             }
             parts.push(format!("{name}={raw}"));
         } else {

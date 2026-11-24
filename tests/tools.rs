@@ -564,6 +564,24 @@ fn valid_references_in_unknown_criteria_are_warning_only() -> Result<()> {
 }
 
 #[test]
+fn compose_line_preserves_runtime_operands_in_unknown_criteria_lists() -> Result<()> {
+    let mut request = wifi_request();
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "EXTRA".into(),
+        Value::Multiple(vec!["1".into(), "*I:Limit".into()]),
+    )]));
+    let result = fixture().compose_line(request)?;
+    assert!(result.line.contains("|EXTRA=1,*I:Limit|"));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "unknown_criteria_key")
+    );
+    Ok(())
+}
+
+#[test]
 fn historical_widths_preserve_all_fields_and_warn() -> Result<()> {
     for line in [
         "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL",
