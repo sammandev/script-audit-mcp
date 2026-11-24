@@ -479,6 +479,33 @@ fn validate_line_checks_eight_fields_without_losing_trailing_empty_field() -> Re
 }
 
 #[test]
+fn validate_line_reports_trailing_line_break_without_invalid_timeout() -> Result<()> {
+    let engine = fixture();
+    for row in [
+        "SSH|OPEN|dut@x|NULL|500",
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|",
+    ] {
+        for suffix in ["\r", "\r\n", "\n"] {
+            let line = format!("{row}{suffix}");
+            let report = engine.validate_line(&line, None)?;
+            assert_eq!(report.status, ValidationStatus::Invalid);
+            assert_eq!(report.segments.join("|"), line);
+            assert_eq!(
+                report.diagnostics.len(),
+                1,
+                "{line:?}: {:?}",
+                report.diagnostics
+            );
+            let issue = &report.diagnostics[0];
+            assert_eq!(issue.field, "line");
+            assert_eq!(issue.code, "reserved_character");
+            assert_eq!(issue.message, "a line must not contain line breaks");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn validate_line_reports_omitted_convention_2_flow_fields_once() -> Result<()> {
     let report =
         fixture().validate_line("DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|100", None)?;
@@ -524,6 +551,11 @@ fn validate_line_reports_timeout_overflow() -> Result<()> {
         ("UNKNOWN", "18446744073709551616", Some("too large")),
         ("OPEN", "0", Some("must be positive")),
         ("OPEN", "+1", Some("must be positive")),
+        ("OPEN", "-1", Some("must be positive")),
+        ("OPEN", "abc", Some("must be positive")),
+        ("OPEN", "1.5", Some("must be positive")),
+        ("OPEN", "0\r\n", Some("must be positive")),
+        ("OPEN", "50\n0", Some("must be positive")),
         ("OPEN", "18446744073709551615", None),
     ] {
         let line = format!("SSH|{function}|DUT@echo|NULL|{timeout}");

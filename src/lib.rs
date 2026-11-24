@@ -108,7 +108,7 @@ impl Engine {
         line: &str,
         device_scope: Option<&str>,
     ) -> Result<ValidationReport> {
-        let segments: Vec<String> = line.split('|').map(str::to_string).collect();
+        let segments: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('|').collect();
         let mut diagnostics = Vec::new();
         if is_commented_line(line) {
             diagnostics.push(grammar::diagnostic(
@@ -117,7 +117,7 @@ impl Engine {
                 "line is commented out with ';' or '//' and the tester skips it; remove the comment prefix to validate the row",
                 Severity::Error,
             ));
-            return Ok(validation_report(segments, diagnostics));
+            return Ok(validation_report(line, diagnostics));
         }
         if line.contains(['\r', '\n']) {
             diagnostics.push(grammar::diagnostic(
@@ -134,7 +134,7 @@ impl Engine {
                 "expected 5, 7, 8, or 9 pipe-delimited fields",
                 Severity::Error,
             ));
-            return Ok(validation_report(segments, diagnostics));
+            return Ok(validation_report(line, diagnostics));
         }
         let (timeout, timeout_overflowed) = if segments[4].bytes().all(|byte| byte.is_ascii_digit())
         {
@@ -146,19 +146,19 @@ impl Engine {
             (0, false)
         };
         let mut request = ComposeRequest {
-            device: segments[0].clone(),
-            function: segments[1].clone(),
+            device: segments[0].to_string(),
+            function: segments[1].to_string(),
             device_scope: device_scope.map(str::to_string),
             params: BTreeMap::new(),
             criteria: CriteriaInput::default(),
             param_sections: Vec::new(),
             criteria_sections: Vec::new(),
             timeout,
-            pass_path: segments.get(5).cloned(),
-            fail_path: segments.get(6).cloned(),
-            error_code: segments.get(7).cloned(),
+            pass_path: segments.get(5).map(ToString::to_string),
+            fail_path: segments.get(6).map(ToString::to_string),
+            error_code: segments.get(7).map(ToString::to_string),
         };
-        let schema = match self.get_function(&segments[0], &segments[1], device_scope) {
+        let schema = match self.get_function(segments[0], segments[1], device_scope) {
             Ok(schema) => schema,
             Err(error) => {
                 let function = self
@@ -171,7 +171,7 @@ impl Engine {
                 ));
                 if function.and_then(grammar::profile) == Some(grammar::Encoding::Named) {
                     grammar::parse_fields(
-                        &grammar::split_section_references(&segments[2]).0,
+                        &grammar::split_section_references(segments[2]).0,
                         &[],
                         grammar::Encoding::Named,
                         false,
@@ -179,7 +179,7 @@ impl Engine {
                     );
                     if segments[3] != grammar::NULL_CRITERION && !segments[3].is_empty() {
                         grammar::parse_fields(
-                            &grammar::split_section_references(&segments[3]).0,
+                            &grammar::split_section_references(segments[3]).0,
                             &[],
                             grammar::Encoding::Named,
                             true,
@@ -205,7 +205,7 @@ impl Engine {
                     error.to_string(),
                     severity,
                 ));
-                return Ok(validation_report(segments, diagnostics));
+                return Ok(validation_report(line, diagnostics));
             }
         };
         let flow_fields_omitted = schema.function.convention == Some(2) && segments.len() == 5;
@@ -233,9 +233,9 @@ impl Engine {
         if let Some(encoding) = grammar::profile(&schema.function) {
             let named = encoding == grammar::Encoding::Named;
             let (parameters, param_sections) = if named {
-                grammar::split_section_references(&segments[2])
+                grammar::split_section_references(segments[2])
             } else {
-                (segments[2].clone(), Vec::new())
+                (segments[2].to_string(), Vec::new())
             };
             request.param_sections = param_sections;
             request.params = grammar::parse_fields(
@@ -248,12 +248,12 @@ impl Engine {
             request.criteria = if segments[3] == grammar::NULL_CRITERION || segments[3].is_empty() {
                 CriteriaInput::default()
             } else if !named && schema.criteria.is_empty() {
-                CriteriaInput::Raw(segments[3].clone())
+                CriteriaInput::Raw(segments[3].to_string())
             } else {
                 let (criteria, criteria_sections) = if named {
-                    grammar::split_section_references(&segments[3])
+                    grammar::split_section_references(segments[3])
                 } else {
-                    (segments[3].clone(), Vec::new())
+                    (segments[3].to_string(), Vec::new())
                 };
                 request.criteria_sections = criteria_sections;
                 CriteriaInput::Named(grammar::parse_fields(
@@ -292,7 +292,7 @@ impl Engine {
                 Severity::Incomplete,
             ));
         }
-        Ok(validation_report(segments, diagnostics))
+        Ok(validation_report(line, diagnostics))
     }
 
     pub fn suggest_criteria(
@@ -604,7 +604,7 @@ pub(crate) fn is_supported_line_width(field_count: usize) -> bool {
     matches!(field_count, 5 | 7 | 8 | 9)
 }
 
-fn validation_report(segments: Vec<String>, diagnostics: Vec<Diagnostic>) -> ValidationReport {
+fn validation_report(line: &str, diagnostics: Vec<Diagnostic>) -> ValidationReport {
     let status = if diagnostics
         .iter()
         .any(|issue| issue.severity == Severity::Error)
@@ -620,7 +620,7 @@ fn validation_report(segments: Vec<String>, diagnostics: Vec<Diagnostic>) -> Val
     };
     ValidationReport {
         status,
-        segments,
+        segments: line.split('|').map(str::to_string).collect(),
         diagnostics,
     }
 }
