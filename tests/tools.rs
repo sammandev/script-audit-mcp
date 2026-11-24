@@ -578,6 +578,30 @@ fn compose_line_preserves_runtime_operands_in_unknown_criteria_lists() -> Result
             .iter()
             .any(|issue| issue.code == "unknown_criteria_key")
     );
+    assert_eq!(
+        fixture().validate_line(&result.line, None)?.status,
+        ValidationStatus::Valid
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_line_preserves_references_in_unknown_criteria_lists() -> Result<()> {
+    let engine = fixture();
+    for value in ["1,*I:Limit", "*V:Outer-*V:Left,Right##,*I:Limit"] {
+        let line =
+            format!("DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|EXTRA={value}|10|NEXT|FAIL|");
+        let report = engine.validate_line(&line, None)?;
+        assert_eq!(
+            report.status,
+            ValidationStatus::Valid,
+            "{value}: {:?}",
+            report.diagnostics
+        );
+        assert!(report.diagnostics.iter().any(|issue| {
+            issue.field == "criteria.EXTRA" && issue.code == "runtime_reference_unchecked"
+        }));
+    }
     Ok(())
 }
 

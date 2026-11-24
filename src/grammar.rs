@@ -678,11 +678,10 @@ fn emit_fields_with_syntax(
                     Severity::Error,
                 ));
             }
-            let values = match value {
-                Value::Single(raw) => std::slice::from_ref(raw),
-                Value::Multiple(values) => values.as_slice(),
+            let raw = match value {
+                Value::Single(raw) => raw.clone(),
+                Value::Multiple(values) => values.join(","),
             };
-            let raw = values.join(",");
             if raw.trim().is_empty() || raw.contains(['|', '\r', '\n', '&', '=']) {
                 issues.push(diagnostic(
                     &key,
@@ -691,7 +690,7 @@ fn emit_fields_with_syntax(
                     Severity::Error,
                 ));
             } else {
-                for value in values {
+                for value in unknown_criterion_values(&raw) {
                     let _ = check_value_references(value, &key, issues);
                 }
             }
@@ -766,6 +765,35 @@ fn reference_opener(bytes: &[u8], index: usize) -> bool {
     bytes.get(index) == Some(&b'*')
         && bytes.get(index + 1).is_some_and(u8::is_ascii_uppercase)
         && bytes.get(index + 2) == Some(&b':')
+}
+
+fn unknown_criterion_values(raw: &str) -> impl Iterator<Item = &str> {
+    let mut separators = Vec::new();
+    if raw.contains(',') {
+        let bytes = raw.as_bytes();
+        let mut open_references = Vec::new();
+        for (index, byte) in bytes.iter().enumerate() {
+            match byte {
+                b',' => separators.push(index),
+                b'*' if reference_opener(bytes, index) => open_references.push(separators.len()),
+                b'#' => {
+                    if let Some(count) = open_references.pop() {
+                        separators.truncate(count);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut start = 0;
+    separators
+        .into_iter()
+        .chain(std::iter::once(raw.len()))
+        .map(move |end| {
+            let value = &raw[start..end];
+            start = end + 1;
+            value
+        })
 }
 
 /// Finds `*X:payload#` tokens; nested openers raise the depth so the matching `#` ends the token.
