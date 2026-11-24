@@ -508,6 +508,62 @@ fn unknown_criteria_are_preserved_with_warnings() -> Result<()> {
 }
 
 #[test]
+fn validate_line_rejects_malformed_references_in_unknown_criteria() -> Result<()> {
+    let report = fixture().validate_line(
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|EXTRA=*V:Unclosed|10|NEXT|FAIL|",
+        None,
+    )?;
+    assert_eq!(report.status, ValidationStatus::Invalid);
+    assert!(report.diagnostics.iter().any(|issue| {
+        issue.field == "criteria.EXTRA"
+            && issue.code == "invalid_reference"
+            && issue.severity == script_audit_mcp::model::Severity::Error
+    }));
+    Ok(())
+}
+
+#[test]
+fn compose_line_rejects_malformed_references_in_unknown_criteria() {
+    let mut request = wifi_request();
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "EXTRA".into(),
+        Value::Single("*V:Unclosed".into()),
+    )]));
+    let result = fixture().compose_line(request);
+    assert!(
+        matches!(&result, Err(script_audit_mcp::Error::Validation(issues))
+        if issues.iter().any(|issue| {
+            issue.field == "criteria.EXTRA"
+                && issue.code == "invalid_reference"
+                && issue.severity == script_audit_mcp::model::Severity::Error
+        })),
+        "must not emit a line with an unclosed reference: {result:?}"
+    );
+}
+
+#[test]
+fn valid_references_in_unknown_criteria_are_warning_only() -> Result<()> {
+    let engine = fixture();
+    for value in ["*V:Closed#", "*E:Runtime"] {
+        let mut request = wifi_request();
+        request.criteria = CriteriaInput::Named(BTreeMap::from([(
+            "EXTRA".into(),
+            Value::Single(value.into()),
+        )]));
+        let result = engine.compose_line(request)?;
+        assert!(result.line.contains(&format!("|EXTRA={value}|")));
+        assert!(result.warnings.iter().any(|issue| {
+            issue.field == "criteria.EXTRA" && issue.code == "unknown_criteria_key"
+        }));
+        assert_eq!(
+            engine.validate_line(&result.line, None)?.status,
+            ValidationStatus::Valid
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn historical_widths_preserve_all_fields_and_warn() -> Result<()> {
     for line in [
         "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL",

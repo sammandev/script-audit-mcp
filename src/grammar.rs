@@ -689,6 +689,8 @@ fn emit_fields_with_syntax(
                     "unknown criterion must still be a nonempty valid assignment value",
                     Severity::Error,
                 ));
+            } else {
+                let _ = check_value_references(&raw, &key, issues);
             }
             parts.push(format!("{name}={raw}"));
         } else {
@@ -824,6 +826,60 @@ fn without_references(raw: &str, replacement: &str) -> Option<String> {
     Some(output)
 }
 
+fn check_value_references(
+    raw: &str,
+    key: &str,
+    issues: &mut Vec<Diagnostic>,
+) -> Option<Vec<Reference>> {
+    if raw.starts_with('*')
+        && ["*E:", "*I:", "*T:"].iter().any(|prefix| {
+            raw.strip_prefix(prefix)
+                .is_some_and(|tail| !tail.trim().is_empty())
+        })
+    {
+        issues.push(diagnostic(
+            key,
+            "runtime_reference_unchecked",
+            "engine reference preserved; runtime target and value are unchecked",
+            Severity::Warning,
+        ));
+        return None;
+    }
+    let found = match references(raw) {
+        Ok(found)
+            if (!found.is_empty() || !raw.starts_with('*'))
+                && found
+                    .iter()
+                    .all(|reference| matches!(reference.kind, b'V' | b'E' | b'I' | b'T')) =>
+        {
+            found
+        }
+        _ => {
+            issues.push(diagnostic(
+                key,
+                "invalid_reference",
+                "expected *V:, *E:, *I:, or *T: references with a nonempty payload ending in #",
+                Severity::Error,
+            ));
+            return None;
+        }
+    };
+    if !found.is_empty() {
+        let runtime = found.iter().any(|reference| reference.kind != b'V');
+        issues.push(diagnostic(
+            key,
+            if runtime {
+                "runtime_reference_unchecked"
+            } else {
+                "bundle_reference_unchecked"
+            },
+            "reference preserved; its target and value are unchecked outside a bundle",
+            Severity::Warning,
+        ));
+    }
+    Some(found)
+}
+
 /// True for one `*V:Header#` token naming a whole data section (no top-level `-key`).
 pub(crate) fn is_section_reference(raw: &str) -> bool {
     if raw.contains(['|', '&', '=', '"']) || raw.chars().any(char::is_control) {
@@ -906,55 +962,12 @@ fn validate_value(
             ));
             continue;
         }
-        if raw.starts_with('*')
-            && ["*E:", "*I:", "*T:"].iter().any(|prefix| {
-                raw.strip_prefix(prefix)
-                    .is_some_and(|tail| !tail.trim().is_empty())
-            })
-        {
-            issues.push(diagnostic(
-                key,
-                "runtime_reference_unchecked",
-                "engine reference preserved; runtime target and value are unchecked",
-                Severity::Warning,
-            ));
+        let Some(found) = check_value_references(raw, key, issues) else {
             continue;
-        }
-        let found = match references(raw) {
-            Ok(found)
-                if (!found.is_empty() || !raw.starts_with('*'))
-                    && found
-                        .iter()
-                        .all(|reference| matches!(reference.kind, b'V' | b'E' | b'I' | b'T')) =>
-            {
-                found
-            }
-            _ => {
-                issues.push(diagnostic(
-                    key,
-                    "invalid_reference",
-                    "expected *V:, *E:, *I:, or *T: references with a nonempty payload ending in #",
-                    Severity::Error,
-                ));
-                continue;
-            }
         };
-        if !found.is_empty() {
-            let runtime = found.iter().any(|reference| reference.kind != b'V');
-            issues.push(diagnostic(
-                key,
-                if runtime {
-                    "runtime_reference_unchecked"
-                } else {
-                    "bundle_reference_unchecked"
-                },
-                "reference preserved; its target and value are unchecked outside a bundle",
-                Severity::Warning,
-            ));
-            if matches!(found.as_slice(), [reference] if reference.start == 0 && reference.end == raw.len())
-            {
-                continue;
-            }
+        if matches!(found.as_slice(), [reference] if reference.start == 0 && reference.end == raw.len())
+        {
+            continue;
         }
         let Ok(expression) = syntax.pattern(definition) else {
             continue;
