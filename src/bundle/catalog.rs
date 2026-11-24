@@ -247,7 +247,20 @@ fn validate_payload(
     let values = if checked.is_empty() {
         BTreeMap::new()
     } else {
-        grammar::parse_fields(&checked, &check_fields, encoding, criteria, issues)
+        let mut literal_issues = Vec::new();
+        let values = grammar::parse_fields(
+            &checked,
+            &check_fields,
+            encoding,
+            criteria,
+            &mut literal_issues,
+        );
+        issues.extend(
+            literal_issues
+                .into_iter()
+                .filter(|issue| issue.code != "duplicate_key"),
+        );
+        values
     };
     grammar::emit_fields(&check_fields, &values, encoding, criteria, issues);
 }
