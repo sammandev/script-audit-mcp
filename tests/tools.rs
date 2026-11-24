@@ -6441,6 +6441,38 @@ async fn bundle_catalog_keeps_function_identity_scope_overrides_and_global_fallb
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn bundle_catalog_reports_duplicate_literal_key_once() -> Result<()> {
+    assert_bundle_duplicate_key_once("ANT=15&ANT=2").await
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn bundle_catalog_reports_duplicate_runtime_key_once() -> Result<()> {
+    assert_bundle_duplicate_key_once("ANT=15&ANT=*E:Station-Ant#").await?;
+    assert_bundle_duplicate_key_once("ANT=15&ANT=2,*E:Station-Ant#").await
+}
+
+#[cfg(feature = "mcp")]
+async fn assert_bundle_duplicate_key_once(parameters: &str) -> Result<()> {
+    let text = format!(
+        "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|{parameters}|NULL|1|QUIT|FAIL\"\n"
+    );
+    let report = bundle_report(bundle_arguments(&text)).await?;
+    assert_eq!(report["status"], "invalid", "{report}");
+    let diagnostics = report["diagnostics"]
+        .as_array()
+        .ok_or_else(|| script_audit_mcp::Error::Knowledge("missing diagnostics".into()))?;
+    let duplicates: Vec<_> = diagnostics
+        .iter()
+        .filter(|issue| issue["code"] == "duplicate_key")
+        .collect();
+    assert_eq!(duplicates.len(), 1, "{parameters}: {duplicates:?}");
+    assert_eq!(duplicates[0]["field"], "params.ANT");
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_catalog_requiredness_constraints_and_unknown_criteria_are_explicit() -> Result<()> {
     for (parameters, criteria, expected, code) in [
         ("NULL", "NULL", "invalid", "required"),
