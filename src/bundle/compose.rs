@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, HashSet};
 use schemars::JsonSchema;
 use script_checker::{
     analysis::ParsedContentAnalysis,
-    parser::common::{is_comment, is_ignored_line},
+    parser::common::{
+        canonical_header, flow_header, is_comment, is_ignored_line, parse_flow_section,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1229,8 +1231,11 @@ fn insert(
         .lines()
         .rev()
         .find(|line| line.trim().starts_with('['))
-        .map(str::trim);
-    if current != Some(selected_flow) {
+        .and_then(parse_flow_section);
+    if !current.is_some_and(|flow| {
+        canonical_header(&flow_header(&flow.kind, &flow.station, flow.sku.as_deref()))
+            == canonical_header(selected_flow)
+    }) {
         return false;
     }
     let newline = if main.text.contains("\r\n") {
