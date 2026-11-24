@@ -6444,6 +6444,66 @@ async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Resul
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_chain_path_budget_does_not_depend_on_requirement_order() -> Result<()> {
+    use serde_json::json;
+
+    let mut arguments = tx_plan_arguments();
+    let row = arguments["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let mut text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n".to_string();
+    let mut append = |name: &str, mask: u32, pass: &str, fail: &str| {
+        let mut row = row
+            .replace("OFDM6=", &format!("{name}="))
+            .replace("ANT=1,2,4,8", &format!("ANT={mask}"))
+            .replace("|QUIT|FAIL", &format!("|{pass}|{fail}"));
+        if mask == 8 {
+            row = row
+                .replace("FREQ=6115", "FREQ=6175")
+                .replace("DATA_RATE=OFDM6", "DATA_RATE=OFDM9");
+        }
+        text.push_str(&row);
+        text.push('\n');
+    };
+    append("SELECT", 8, "CHAIN1", "PADDING0");
+    append("CHAIN1", 1, "CHAIN2", "FAIL");
+    append("CHAIN2", 2, "PADDING0", "FAIL");
+    for index in 0..600 {
+        append(&format!("PADDING{index}"), 8, "NEXT", "NEXT");
+    }
+    append("CHAIN4", 4, "QUIT", "FAIL");
+    arguments["bundle"]["files"][0]["text"] = json!(text);
+
+    let mut quick = arguments["plan"]["requirements"][0].clone();
+    quick["test"]["chains"]["value"] = json!([1, 2]);
+    let mut requirements = (0..75)
+        .map(|index| {
+            let mut long = quick.clone();
+            long["id"] = json!(format!("LONG-{index}"));
+            long["test"]["chains"]["value"] = json!([1, 2, 4]);
+            long
+        })
+        .collect::<Vec<_>>();
+    requirements.insert(0, quick);
+    arguments["plan"]["requirements"] = json!(requirements);
+    let first = plan_report(arguments.clone()).await?;
+    assert_eq!(first["validation"]["status"], "valid");
+    assert_eq!(first["coverage"][0]["status"], "matched", "quick first");
+
+    requirements.rotate_left(1);
+    arguments["plan"]["requirements"] = json!(requirements);
+    let last = plan_report(arguments).await?;
+    assert_eq!(last["coverage"][75]["status"], "matched", "quick last");
+    for report in [first, last] {
+        assert_eq!(report["mandatory"]["matched"], 76);
+        assert_eq!(report["ready_for_review"], true);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_comparison_budget_never_reports_partial_analysis_as_ready() -> Result<()> {
     use serde_json::json;
     let mut arguments = tx_plan_arguments();

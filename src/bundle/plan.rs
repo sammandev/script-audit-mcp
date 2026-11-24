@@ -477,7 +477,6 @@ pub(super) fn compare_checked(
     let mut witnesses = BTreeMap::new();
     let mut comparisons = 0;
     let mut chain_graph = None;
-    let mut chain_budget = 262_144;
     let mut coverage: Vec<_> = request.plan.requirements.iter().filter(|requirement| {
         requirement.applicability == Applicability::Mandatory || request.flow_variant == FlowVariant::Sampling
     }).map(|requirement| {
@@ -548,6 +547,7 @@ pub(super) fn compare_checked(
         let mut chain_path_conflict = None;
         let mut chain_path_unknown = false;
         if let Some(Chains::PerChain(expected)) = &test.chains && !partials.is_empty() {
+            let mut chain_budget = 262_144;
             let graph = chain_graph.get_or_insert_with(|| {
                 let mut graph: HashMap<&str, Vec<_>> = HashMap::new();
                 for edge in &validation.execution_edges {
