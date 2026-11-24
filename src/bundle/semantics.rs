@@ -527,7 +527,7 @@ impl<'a> Analyzer<'a, '_> {
                 "BRANCH_LABEL_AMBIGUOUS",
                 "Repeated branch labels are preserved, but selecting one is not audited.",
             );
-            for (target, _) in matches {
+            for &(target, _) in &matches {
                 if let Some(target) = run.nodes.get(target) {
                     self.edge(
                         run.nodes[index],
@@ -545,11 +545,13 @@ impl<'a> Analyzer<'a, '_> {
                 "DYNAMIC_CONTROL_UNSUPPORTED",
                 "Runtime-dependent routing cannot establish a static execution path.",
             );
-        } else if has_reference(if pass {
-            &run.section.rows[index].pass_path
-        } else {
-            &run.section.rows[index].fail_path
-        }) {
+        } else if matches.is_empty()
+            && has_reference(if pass {
+                &run.section.rows[index].pass_path
+            } else {
+                &run.section.rows[index].fail_path
+            })
+        {
             self.resolver.diagnostics.push(BundleDiagnostic::new("control_flow", "BRANCH_TARGET_MISSING", "Resolved branch target is not a section-local label or an audited control token.")
                 .at(&run.section.source, run.section.rows[index].line, Some(&run.section.name), Some(&run.section.rows[index].label_raw))
                 .field(if pass { "pass_path" } else { "fail_path" }, Some(token)));

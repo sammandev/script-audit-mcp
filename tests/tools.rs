@@ -8070,6 +8070,42 @@ async fn bundle_budgets_fallthrough_and_unsupported_macros_keep_honest_execution
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn bundle_reports_resolved_branch_label_ambiguity_like_literal() -> Result<()> {
+    use serde_json::json;
+
+    for pass_path in ["B", "*V:Routes-After#"] {
+        let text = format!(
+            concat!(
+                "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
+                "A=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|{}|FAIL\"\n",
+                "B=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|PASS|FAIL\"\n",
+                "B=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|PASS|FAIL\"\n",
+            ),
+            pass_path
+        );
+        let mut arguments = bundle_arguments(&text);
+        arguments["files"]
+            .as_array_mut()
+            .ok_or_else(|| script_audit_mcp::Error::Knowledge("fixture files missing".into()))?
+            .push(json!({"name":"SETTINGS.ini","text":"[Routes]\nAfter=B\n"}));
+        let report = bundle_report(arguments).await?;
+        assert_eq!(report["execution"][0]["pass_path"], "B", "{pass_path}");
+        let diagnostics = report["diagnostics"].as_array().ok_or_else(|| {
+            script_audit_mcp::Error::Knowledge("missing bundle diagnostics".into())
+        })?;
+        let codes: Vec<_> = diagnostics.iter().map(|issue| &issue["code"]).collect();
+        assert_eq!(codes, ["BRANCH_LABEL_AMBIGUOUS"], "{pass_path}");
+        assert_eq!(
+            report["layers"]["control_flow"], "incomplete",
+            "{pass_path}"
+        );
+        assert_eq!(report["status"], "incomplete", "{pass_path}");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_resolved_control_fields_and_missing_call_arguments_are_not_confused() -> Result<()>
 {
     let text = concat!(
