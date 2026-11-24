@@ -9,6 +9,7 @@ pub mod postgres;
 pub mod sqlite;
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::IntErrorKind;
 
 use model::{
     ComposeRequest, ComposeResult, CriteriaInput, CriteriaSuggestions, Definition, Diagnostic,
@@ -99,7 +100,7 @@ impl Engine {
             &request.function,
             request.device_scope.as_deref(),
         )?;
-        grammar::compose(&schema, &request)
+        grammar::compose(&schema, &request, false)
     }
 
     pub fn validate_line(
@@ -135,14 +136,14 @@ impl Engine {
             ));
             return Ok(validation_report(segments, diagnostics));
         }
-        let timeout = if !segments[4].is_empty()
-            && segments[4]
-                .bytes()
-                .all(|character| character.is_ascii_digit())
+        let (timeout, timeout_overflowed) = if segments[4].bytes().all(|byte| byte.is_ascii_digit())
         {
-            segments[4].parse::<u64>().unwrap_or(0)
+            match segments[4].parse::<u64>() {
+                Ok(timeout) => (timeout, false),
+                Err(error) => (0, *error.kind() == IntErrorKind::PosOverflow),
+            }
         } else {
-            0
+            (0, false)
         };
         let mut request = ComposeRequest {
             device: segments[0].clone(),
@@ -166,6 +167,7 @@ impl Engine {
                 diagnostics.extend(grammar::fixed_issues(
                     &request,
                     function.and_then(|function| function.convention),
+                    timeout_overflowed,
                 ));
                 if function.and_then(grammar::profile) == Some(grammar::Encoding::Named) {
                     grammar::parse_fields(
@@ -262,7 +264,7 @@ impl Engine {
                 ))
             };
         }
-        match grammar::compose(&schema, &request) {
+        match grammar::compose(&schema, &request, timeout_overflowed) {
             Ok(result) => diagnostics.extend(result.warnings),
             Err(Error::Validation(issues)) => diagnostics.extend(issues),
             Err(error) => diagnostics.push(grammar::diagnostic(

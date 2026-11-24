@@ -348,13 +348,21 @@ fn parsed_value(raw: &str, field: Option<&Field>) -> Value {
     }
 }
 
-pub(crate) fn fixed_issues(request: &ComposeRequest, convention: Option<i64>) -> Vec<Diagnostic> {
+pub(crate) fn fixed_issues(
+    request: &ComposeRequest,
+    convention: Option<i64>,
+    timeout_overflowed: bool,
+) -> Vec<Diagnostic> {
     let mut issues = Vec::new();
     if request.timeout == 0 {
         issues.push(diagnostic(
             "timeout",
             "invalid_timeout",
-            "timeout must be positive integer milliseconds",
+            if timeout_overflowed {
+                "timeout is too large; maximum is 18446744073709551615 milliseconds"
+            } else {
+                "timeout must be positive integer milliseconds"
+            },
             Severity::Error,
         ));
     }
@@ -415,8 +423,12 @@ pub(crate) fn fixed_issues(request: &ComposeRequest, convention: Option<i64>) ->
     issues
 }
 
-pub(crate) fn compose(schema: &FunctionSchema, request: &ComposeRequest) -> Result<ComposeResult> {
-    let mut issues = fixed_issues(request, schema.function.convention);
+pub(crate) fn compose(
+    schema: &FunctionSchema,
+    request: &ComposeRequest,
+    timeout_overflowed: bool,
+) -> Result<ComposeResult> {
+    let mut issues = fixed_issues(request, schema.function.convention, timeout_overflowed);
     issues.extend(schema.diagnostics.iter().cloned());
     let encoding = profile(&schema.function);
     for (sections, prefix) in [
