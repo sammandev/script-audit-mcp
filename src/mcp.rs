@@ -490,7 +490,7 @@ mod tests {
                 "diagnostics": [
                     { "field": "function", "code": "unsupported_convention",
                       "message": "function convention is missing or unsupported", "severity": "incomplete" },
-                    { "field": "function", "code": "invalid_input", "message": message, "severity": "error" }
+                    { "field": "device", "code": "invalid_input", "message": message, "severity": "error" }
                 ]
             }))
         );

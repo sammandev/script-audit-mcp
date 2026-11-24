@@ -94,8 +94,12 @@ pub(super) fn validate(
                         }
                     }
                 }
+                let field = match &error {
+                    Error::InvalidInput { field, .. } => field.as_str(),
+                    _ => "function",
+                };
                 issues.push(grammar::diagnostic(
-                    "function",
+                    field,
                     error.code(),
                     error.to_string(),
                     if matches!(error, Error::Knowledge(_) | Error::UnsupportedGrammar(_)) {
