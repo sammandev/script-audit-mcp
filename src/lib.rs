@@ -234,10 +234,14 @@ impl Engine {
             );
             request.criteria = if segments[3] == grammar::NULL_CRITERION || segments[3].is_empty() {
                 CriteriaInput::default()
-            } else if !named {
+            } else if !named && schema.criteria.is_empty() {
                 CriteriaInput::Raw(segments[3].clone())
             } else {
-                let (criteria, criteria_sections) = grammar::split_section_references(&segments[3]);
+                let (criteria, criteria_sections) = if named {
+                    grammar::split_section_references(&segments[3])
+                } else {
+                    (segments[3].clone(), Vec::new())
+                };
                 request.criteria_sections = criteria_sections;
                 CriteriaInput::Named(grammar::parse_fields(
                     &criteria,

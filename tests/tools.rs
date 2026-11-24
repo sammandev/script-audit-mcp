@@ -615,6 +615,116 @@ fn compose_line_rejects_null_for_required_raw_criterion() -> Result<()> {
         matches!(&result, Err(script_audit_mcp::Error::Validation(issues)) if issues.iter().any(|issue| issue.field == "criteria.EXPECTED_RESPONSE" && issue.code == "required")),
         "expected a required criterion error from compose_line: {result:?}"
     );
+
+    let map = |value: &str| {
+        CriteriaInput::Named(BTreeMap::from([(
+            "EXPECTED_RESPONSE".into(),
+            Value::Single(value.into()),
+        )]))
+    };
+    let mut request = ssh_request("DUT@echo", "NULL");
+    request.timeout = 1;
+    request.criteria = map("NULL");
+    let result = engine.compose_line(request.clone());
+    assert!(
+        matches!(&result, Err(script_audit_mcp::Error::Validation(issues)) if issues.iter().any(|issue| issue.field == "criteria.EXPECTED_RESPONSE" && issue.code == "required")),
+        "expected a required criterion error from compose_line for a map: {result:?}"
+    );
+
+    let mut snapshot = fixture_snapshot();
+    for definition in &mut snapshot.criteria_definitions {
+        if definition.name == "EXPECTED_RESPONSE" {
+            definition.allowed_values = "{READY}".into();
+        }
+    }
+    let optional = Engine::new(snapshot);
+    let result = optional.compose_line(request.clone())?;
+    assert_eq!(result.line, "SSH|OPEN|DUT@echo|NULL|1");
+    assert!(result.warnings.is_empty());
+    assert_eq!(
+        optional.validate_line(&result.line, None)?.status,
+        ValidationStatus::Valid
+    );
+
+    request.criteria = map("READY");
+    let result = engine.compose_line(request)?;
+    assert_eq!(result.line, "SSH|OPEN|DUT@echo|READY|1");
+    assert!(result.warnings.is_empty());
+    assert_eq!(
+        engine.validate_line(&result.line, None)?.status,
+        ValidationStatus::Valid
+    );
+    Ok(())
+}
+
+#[test]
+fn compose_line_preserves_null_for_a_named_criterion() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    for definition in &mut snapshot.criteria_definitions {
+        if definition.name == "POWER" {
+            definition.kind = "string".into();
+            definition.unit.clear();
+            definition.value_pattern = "<value>".into();
+            definition.allowed_values.clear();
+        }
+    }
+    let engine = Engine::new(snapshot);
+    let mut request = wifi_request();
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "POWER".into(),
+        Value::Single("NULL".into()),
+    )]));
+    let result = engine.compose_line(request)?;
+    assert_eq!(
+        result.line,
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|POWER=NULL|20000|NEXT|FAIL|"
+    );
+    assert!(result.warnings.is_empty());
+    assert_eq!(
+        engine.validate_line(&result.line, None)?.status,
+        ValidationStatus::Valid
+    );
+    Ok(())
+}
+
+#[test]
+fn compose_line_rejects_a_raw_criteria_list_that_emits_only_null() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    for link in &mut snapshot.criteria_links {
+        if link.device_name == "SSH" {
+            link.required = true;
+        }
+    }
+    for definition in &mut snapshot.criteria_definitions {
+        if definition.name == "EXPECTED_RESPONSE" {
+            definition.cardinality = "MULTIPLE".into();
+        }
+    }
+    let engine = Engine::new(snapshot);
+    let mut request = ssh_request("DUT@echo", "NULL");
+    request.criteria = CriteriaInput::Named(BTreeMap::from([(
+        "EXPECTED_RESPONSE".into(),
+        Value::Multiple(vec!["NULL".into()]),
+    )]));
+    let result = engine.compose_line(request.clone());
+    assert!(
+        matches!(&result, Err(script_audit_mcp::Error::Validation(issues)) if issues.iter().any(|issue| issue.field == "criteria.EXPECTED_RESPONSE" && issue.code == "required")),
+        "expected a required criterion error from compose_line for a list: {result:?}"
+    );
+
+    for criteria in [vec!["READY"], vec!["READY", "SET"]] {
+        request.criteria = CriteriaInput::Named(BTreeMap::from([(
+            "EXPECTED_RESPONSE".into(),
+            Value::Multiple(criteria.iter().map(|value| (*value).into()).collect()),
+        )]));
+        let line = engine.compose_line(request.clone())?.line;
+        assert_eq!(
+            line,
+            format!("SSH|OPEN|DUT@echo|{}|5000", criteria.join(","))
+        );
+        let report = engine.validate_line(&line, None)?;
+        assert_eq!(report.status, ValidationStatus::Valid, "{report:?}");
+    }
     Ok(())
 }
 
