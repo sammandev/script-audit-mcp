@@ -766,6 +766,37 @@ fn compose_line_rejects_null_for_required_raw_criterion() -> Result<()> {
 }
 
 #[test]
+fn compose_line_rejects_explicit_empty_raw_criteria_without_a_linked_criterion() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot
+        .criteria_links
+        .retain(|link| link.device_name != "SSH");
+    let engine = Engine::new(snapshot);
+
+    let result = engine.compose_line(ssh_request("DUT@echo", ""));
+    assert!(
+        matches!(&result, Err(script_audit_mcp::Error::Validation(issues)) if issues.iter().any(|issue| issue.field == "criteria" && issue.code == "invalid_value")),
+        "expected an empty criteria error from compose_line: {result:?}"
+    );
+
+    for criteria in [CriteriaInput::default(), CriteriaInput::Raw("NULL".into())] {
+        let mut request = ssh_request("DUT@echo", "");
+        request.criteria = criteria;
+        assert_eq!(
+            engine.compose_line(request)?.line,
+            "SSH|OPEN|DUT@echo|NULL|5000"
+        );
+    }
+    for line in ["SSH|OPEN|DUT@echo|NULL|5000", "SSH|OPEN|DUT@echo||5000"] {
+        assert_eq!(
+            engine.validate_line(line, None)?.status,
+            ValidationStatus::Valid
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn compose_line_preserves_null_for_a_named_criterion() -> Result<()> {
     let mut snapshot = fixture_snapshot();
     for definition in &mut snapshot.criteria_definitions {
