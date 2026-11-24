@@ -713,11 +713,12 @@ fn check_dependencies(
     witnesses: &BTreeMap<String, Vec<String>>,
     validation: &BundleReport,
 ) {
-    let indices: HashMap<_, _> = coverage
+    let indices: BTreeMap<_, _> = coverage
         .iter()
         .enumerate()
         .map(|(index, case)| (case.requirement_id.clone(), index))
         .collect();
+    let structural_statuses: Vec<_> = coverage.iter().map(|case| case.status).collect();
     let mut graph: HashMap<&str, Vec<_>> = HashMap::new();
     let rows: HashMap<_, _> = validation
         .execution
@@ -728,15 +729,15 @@ fn check_dependencies(
         graph.entry(&edge.source).or_default().push(edge);
     }
     let mut budget = 262_144_usize;
-    for index in 0..coverage.len() {
-        if coverage[index].status != "matched" {
+    for &index in indices.values() {
+        if structural_statuses[index] != "matched" {
             continue;
         }
         for dependency in coverage[index].depends_on.clone() {
             let result = if let Some(&prerequisite) = indices.get(&dependency) {
-                if coverage[prerequisite].status != "matched" {
+                if structural_statuses[prerequisite] != "matched" {
                     (
-                        if matches!(coverage[prerequisite].status, "missing" | "conflicting") {
+                        if matches!(structural_statuses[prerequisite], "missing" | "conflicting") {
                             "conflicting"
                         } else {
                             "unknown"
@@ -820,7 +821,7 @@ fn check_dependencies(
             }
         }
     }
-    for index in 0..coverage.len() {
+    for &index in indices.values() {
         if coverage[index].status != "matched"
             || coverage[index].test.technology.as_deref() != Some("bluetooth")
             || !matches!(coverage[index].test.purpose.as_deref(), Some("tx" | "rx"))

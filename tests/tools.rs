@@ -5650,6 +5650,65 @@ async fn plan_report(arguments: serde_json::Value) -> Result<serde_json::Value> 
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_prerequisite_coverage_is_independent_of_requirement_order() -> Result<()> {
+    use serde_json::json;
+    let mut arguments = tx_plan_arguments();
+    let bundle = &mut arguments["bundle"]["files"][0]["text"];
+    let text = bundle.as_str().unwrap_or_default();
+    let row = text.lines().last().unwrap_or_default();
+    let followup = row
+        .replace("OFDM6", "OFDM9")
+        .replace("FREQ=6115", "FREQ=6135");
+    *bundle = json!(format!(
+        "{}{followup}\n",
+        text.replace("|QUIT|FAIL", "|NEXT|FAIL")
+    ));
+    let mut middle = arguments["plan"]["requirements"][0].clone();
+    middle["depends_on"] = json!(["SETUP"]);
+    let mut leaf = middle.clone();
+    leaf["id"] = json!("TX-OFDM9");
+    leaf["depends_on"] = json!(["TX-OFDM6"]);
+    leaf["test"]["rate"] = json!("OFDM9");
+    leaf["test"]["frequency"]["value"] = json!(6135);
+    let root = json!({
+        "id":"SETUP", "applicability":"mandatory",
+        "provenance":middle["provenance"],
+        "test":{"purpose":"setup","procedure":{"device":"SSH","function":"OPEN","parameters":"fixture@fixture-host","criteria":"NULL"}}
+    });
+    let cases = [
+        (&root, "missing"),
+        (&middle, "conflicting"),
+        (&leaf, "unknown"),
+    ];
+    let mut outcomes = Vec::new();
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        arguments["plan"]["requirements"] = json!(order.map(|index| cases[index].0));
+        let report = plan_report(arguments.clone()).await?;
+        let coverage = report["coverage"]
+            .as_array()
+            .ok_or_else(|| script_audit_mcp::Error::Knowledge("missing coverage array".into()))?;
+        let statuses: Vec<_> = coverage.iter().map(|case| case["status"].clone()).collect();
+        outcomes.push((order, statuses));
+    }
+    for (order, statuses) in &outcomes {
+        assert_eq!(
+            *statuses,
+            order.map(|index| cases[index].1),
+            "coverage statuses by permutation: {outcomes:?}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_matches_sourced_tx_values_and_executable_locations() -> Result<()> {
     let arguments = tx_plan_arguments();
     let report = plan_report(arguments.clone()).await?;
