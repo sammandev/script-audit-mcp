@@ -706,11 +706,25 @@ fn compose_line_rejects_a_raw_criteria_list_that_emits_only_null() -> Result<()>
         "EXPECTED_RESPONSE".into(),
         Value::Multiple(vec!["NULL".into()]),
     )]));
-    let result = engine.compose_line(request);
+    let result = engine.compose_line(request.clone());
     assert!(
         matches!(&result, Err(script_audit_mcp::Error::Validation(issues)) if issues.iter().any(|issue| issue.field == "criteria.EXPECTED_RESPONSE" && issue.code == "required")),
         "expected a required criterion error from compose_line for a list: {result:?}"
     );
+
+    for criteria in [vec!["READY"], vec!["READY", "SET"]] {
+        request.criteria = CriteriaInput::Named(BTreeMap::from([(
+            "EXPECTED_RESPONSE".into(),
+            Value::Multiple(criteria.iter().map(|value| (*value).into()).collect()),
+        )]));
+        let line = engine.compose_line(request.clone())?.line;
+        assert_eq!(
+            line,
+            format!("SSH|OPEN|DUT@echo|{}|5000", criteria.join(","))
+        );
+        let report = engine.validate_line(&line, None)?;
+        assert_eq!(report.status, ValidationStatus::Valid, "{report:?}");
+    }
     Ok(())
 }
 
