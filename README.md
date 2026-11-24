@@ -169,8 +169,10 @@ Call `validate_ini_bundle` with supplied contents, never server filesystem paths
 other logical files are optional during partial validation. Names are unique
 case-insensitively and contain only ASCII letters, digits, `_`, `-`, or `.`.
 Paths and URLs are rejected. References in supplied text never trigger filesystem
-or network reads. Each accepted request uses one existing blocking, read-only,
-repeatable-read catalog snapshot for all Function and scoped definition checks.
+or network reads. If validation produces execution rows anywhere in the bundle,
+it reads one blocking, read-only, repeatable-read catalog snapshot for all
+Function and scoped definition checks. With no execution rows, validation does
+not read the catalog or report catalog errors.
 
 The `hh5k` dialect accepts seven core fields and an optional eighth error code.
 The third field is PARAM and the fourth is CRITERIA. Decimal numeric timeouts
