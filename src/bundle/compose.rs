@@ -1174,20 +1174,26 @@ fn supported(
     parameters: &str,
     criteria: &str,
 ) -> bool {
-    let Ok(schema) = engine.get_function(device, function, scope) else {
+    let Ok(schema) = engine
+        .resolve_function(device, function)
+        .and_then(|function| engine.linked_schema(function, scope))
+    else {
         return false;
     };
-    let Some(encoding) = grammar::bundle_profile(&schema.function) else {
+    let grammar = grammar::BundleGrammar::new(&schema);
+    let Some(encoding) = grammar.encoding() else {
         return false;
     };
-    let mut issues = grammar::bundle_payload_support_issues(&schema, parameters, criteria);
+    let mut issues: Vec<_> = grammar
+        .payload_support_issues(&schema, parameters, criteria)
+        .collect();
     for (raw, fields, criteria) in [
         (parameters, schema.parameters.as_slice(), false),
         (criteria, schema.criteria.as_slice(), true),
     ] {
         let raw = if raw == "NULL" { "" } else { raw };
         let values = grammar::parse_fields(raw, fields, encoding, criteria, &mut issues);
-        grammar::emit_fields(fields, &values, encoding, criteria, &mut issues);
+        grammar.emit_fields(fields, &values, encoding, criteria, &mut issues);
     }
     !issues
         .iter()

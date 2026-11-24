@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    cell::OnceCell,
+    collections::{BTreeMap, HashMap},
+};
 
 use regex::Regex;
 
@@ -90,54 +93,109 @@ pub(crate) fn bundle_profile(function: &Function) -> Option<Encoding> {
 }
 
 pub(crate) fn support_issues(schema: &FunctionSchema) -> Vec<Diagnostic> {
-    support_issues_with_bundle_keys(schema, false)
+    support_issues_for(schema, None)
 }
 
-pub(crate) fn bundle_support_issues(schema: &FunctionSchema) -> Vec<Diagnostic> {
-    support_issues_with_bundle_keys(schema, true)
+pub(crate) struct BundleGrammar {
+    encoding: Option<Encoding>,
+    support_issues: Vec<Diagnostic>,
+    parameters: FieldSyntaxes,
+    criteria: FieldSyntaxes,
 }
 
-pub(crate) fn bundle_payload_support_issues(
-    schema: &FunctionSchema,
-    parameters: &str,
-    criteria: &str,
-) -> Vec<Diagnostic> {
-    let mut issues = bundle_support_issues(schema);
-    if bundle_profile(&schema.function) != Some(Encoding::Named) {
-        return issues;
+type FieldSyntaxes = HashMap<String, FieldSyntax>;
+
+impl BundleGrammar {
+    pub(crate) fn new(schema: &FunctionSchema) -> Self {
+        let syntax = |fields: &[Field]| {
+            fields
+                .iter()
+                .filter(|field| field.definition.is_some())
+                .map(|field| (field.name.clone(), FieldSyntax::default()))
+                .collect()
+        };
+        let mut grammar = Self {
+            encoding: bundle_profile(&schema.function),
+            support_issues: Vec::new(),
+            parameters: syntax(&schema.parameters),
+            criteria: syntax(&schema.criteria),
+        };
+        grammar.support_issues = support_issues_for(schema, Some(&grammar));
+        grammar
     }
-    issues.retain(|issue| {
-        let Some((prefix, name)) = issue.field.split_once('.') else {
-            return true;
-        };
-        let (fields, raw) = match prefix {
-            "params" => (&schema.parameters, parameters),
-            "criteria" => (&schema.criteria, criteria),
-            _ => return true,
-        };
-        fields
+
+    pub(crate) fn encoding(&self) -> Option<Encoding> {
+        self.encoding
+    }
+
+    pub(crate) fn payload_support_issues<'a>(
+        &'a self,
+        schema: &'a FunctionSchema,
+        parameters: &'a str,
+        criteria: &'a str,
+    ) -> impl Iterator<Item = Diagnostic> + 'a {
+        self.support_issues
             .iter()
-            .find(|field| field.name == name)
-            .is_none_or(|field| {
-                field.required
-                    || raw.split('&').any(|assignment| {
-                        assignment.split_once('=').map_or_else(
-                            || assignment.contains('*'),
-                            |(key, _)| key == name || key.contains('*'),
-                        )
+            .filter(move |issue| {
+                if self.encoding != Some(Encoding::Named) {
+                    return true;
+                }
+                let Some((prefix, name)) = issue.field.split_once('.') else {
+                    return true;
+                };
+                let (fields, raw) = match prefix {
+                    "params" => (&schema.parameters, parameters),
+                    "criteria" => (&schema.criteria, criteria),
+                    _ => return true,
+                };
+                fields
+                    .iter()
+                    .find(|field| field.name == name)
+                    .is_none_or(|field| {
+                        field.required
+                            || raw.split('&').any(|assignment| {
+                                assignment.split_once('=').map_or_else(
+                                    || assignment.contains('*'),
+                                    |(key, _)| key == name || key.contains('*'),
+                                )
+                            })
                     })
             })
-    });
-    issues
+            .cloned()
+    }
+
+    pub(crate) fn emit_fields(
+        &self,
+        fields: &[Field],
+        values: &BTreeMap<String, Value>,
+        encoding: Encoding,
+        criteria: bool,
+        issues: &mut Vec<Diagnostic>,
+    ) {
+        emit_fields_with_syntax(
+            fields,
+            values,
+            encoding,
+            criteria,
+            issues,
+            Some(self.syntax(criteria)),
+        );
+    }
+
+    fn syntax(&self, criteria: bool) -> &FieldSyntaxes {
+        if criteria {
+            &self.criteria
+        } else {
+            &self.parameters
+        }
+    }
 }
 
-fn support_issues_with_bundle_keys(schema: &FunctionSchema, bundle: bool) -> Vec<Diagnostic> {
+fn support_issues_for(schema: &FunctionSchema, grammar: Option<&BundleGrammar>) -> Vec<Diagnostic> {
+    let bundle = grammar.is_some();
     let mut issues = Vec::new();
-    let Some(encoding) = (if bundle {
-        bundle_profile(&schema.function)
-    } else {
-        profile(&schema.function)
-    }) else {
+    let Some(encoding) = grammar.map_or_else(|| profile(&schema.function), BundleGrammar::encoding)
+    else {
         return vec![diagnostic(
             "function",
             "unsupported_grammar",
@@ -246,7 +304,11 @@ fn support_issues_with_bundle_keys(schema: &FunctionSchema, bundle: bool) -> Vec
                     Severity::Incomplete,
                 ));
             }
-            if let Err(message) = pattern(definition) {
+            let local = FieldSyntax::default();
+            let syntax = grammar
+                .and_then(|grammar| grammar.syntax(prefix == "criteria").get(&field.name))
+                .unwrap_or(&local);
+            if let Err(message) = syntax.pattern(definition) {
                 issues.push(diagnostic(
                     &key,
                     "unsupported_pattern",
@@ -254,7 +316,7 @@ fn support_issues_with_bundle_keys(schema: &FunctionSchema, bundle: bool) -> Vec
                     Severity::Incomplete,
                 ));
             }
-            if let Err(message) = allowed(&definition.allowed_values) {
+            if let Err(message) = syntax.allowed(definition) {
                 issues.push(diagnostic(
                     &key,
                     "unsupported_constraint",
@@ -552,6 +614,17 @@ pub(crate) fn emit_fields(
     criteria: bool,
     issues: &mut Vec<Diagnostic>,
 ) -> String {
+    emit_fields_with_syntax(fields, values, encoding, criteria, issues, None)
+}
+
+fn emit_fields_with_syntax(
+    fields: &[Field],
+    values: &BTreeMap<String, Value>,
+    encoding: Encoding,
+    criteria: bool,
+    issues: &mut Vec<Diagnostic>,
+    syntax: Option<&FieldSyntaxes>,
+) -> String {
     let prefix = if criteria { "criteria" } else { "params" };
     let raw_criteria = criteria && encoding == Encoding::Raw;
     let mut parts = Vec::new();
@@ -571,7 +644,11 @@ pub(crate) fn emit_fields(
             }
             continue;
         };
-        let raw = validate_value(field, value, encoding, &key, issues);
+        let local = FieldSyntax::default();
+        let syntax = syntax
+            .and_then(|syntax| syntax.get(&field.name))
+            .unwrap_or(&local);
+        let raw = validate_value(field, value, encoding, &key, issues, syntax);
         parts.push(if encoding == Encoding::Named {
             format!("{}={raw}", field.name)
         } else {
@@ -774,12 +851,30 @@ pub(crate) fn split_section_references(raw: &str) -> (String, Vec<String>) {
     )
 }
 
+#[derive(Default)]
+struct FieldSyntax {
+    pattern: OnceCell<std::result::Result<Regex, String>>,
+    allowed: OnceCell<std::result::Result<Allowed, String>>,
+}
+
+impl FieldSyntax {
+    fn pattern(&self, definition: &Definition) -> &std::result::Result<Regex, String> {
+        self.pattern.get_or_init(|| pattern(definition))
+    }
+
+    fn allowed(&self, definition: &Definition) -> &std::result::Result<Allowed, String> {
+        self.allowed
+            .get_or_init(|| allowed(&definition.allowed_values))
+    }
+}
+
 fn validate_value(
     field: &Field,
     value: &Value,
     encoding: Encoding,
     key: &str,
     issues: &mut Vec<Diagnostic>,
+    syntax: &FieldSyntax,
 ) -> String {
     let values = match value {
         Value::Single(raw) => vec![raw.as_str()],
@@ -861,7 +956,7 @@ fn validate_value(
                 continue;
             }
         }
-        let Ok(expression) = pattern(definition) else {
+        let Ok(expression) = syntax.pattern(definition) else {
             continue;
         };
         let checked = if found.is_empty() {
@@ -925,7 +1020,7 @@ fn validate_value(
                 ));
                 continue;
             }
-            match allowed(&definition.allowed_values) {
+            match syntax.allowed(definition) {
                 Ok(Allowed::Characters(expression)) if !expression.is_match(token) => {
                     issues.push(diagnostic(
                         key,
@@ -948,7 +1043,7 @@ fn validate_value(
                 }
                 Ok(Allowed::Range(lower, upper))
                     if !numeric.parse::<f64>().is_ok_and(|number| {
-                        number.is_finite() && number >= lower && number <= upper
+                        number.is_finite() && number >= *lower && number <= *upper
                     }) =>
                 {
                     issues.push(diagnostic(
@@ -1156,6 +1251,7 @@ mod tests {
                 Encoding::Named,
                 "params.ANT",
                 &mut issues,
+                &FieldSyntax::default(),
             );
             assert!(issues.iter().any(|issue| issue.code == "invalid_value"));
         }
@@ -1191,7 +1287,7 @@ mod tests {
             examples: vec![],
             diagnostics: vec![],
         };
-        assert!(bundle_support_issues(&schema).is_empty());
+        assert!(BundleGrammar::new(&schema).support_issues.is_empty());
         for (raw, valid) in [
             ("11AG", true),
             ("11AX", true),
@@ -1206,6 +1302,7 @@ mod tests {
                 Encoding::Named,
                 "params.STANDARD",
                 &mut issues,
+                &FieldSyntax::default(),
             );
             assert_eq!(issues.is_empty(), valid, "{raw}: {issues:?}");
         }
@@ -1295,7 +1392,7 @@ mod tests {
             .map(|issue| issue.field)
             .collect();
         assert_eq!(line, vec!["params.SWEEP".to_string()]);
-        assert!(bundle_support_issues(&schema).is_empty());
+        assert!(BundleGrammar::new(&schema).support_issues.is_empty());
 
         let schema = named_schema(
             "TX_MULTI_VERIFICATION",

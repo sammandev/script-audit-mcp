@@ -7443,6 +7443,47 @@ async fn bundle_catalog_orphans_and_unsupported_knowledge_never_pass_or_fill_def
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn bundle_catalog_reused_schema_keeps_diagnostics_row_specific() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.criteria_definitions[0].value_pattern = "[<optional>]".into();
+    let text = concat!(
+        "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
+        "A=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|NEXT|FAIL\"\n",
+        "B=\"DLLwifi_test#QUICK|tx_multi_verification|ANT=999|NULL|1|NEXT|FAIL\"\n",
+        "C=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=2|POWER=5dB|1|NEXT|FAIL\"\n",
+        "D=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|QUIT|FAIL\"\n",
+    );
+    let report = bundle_report_with_snapshot(bundle_arguments(text), snapshot).await?;
+    let issues: Vec<_> = report["diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|issue| issue["layer"] == "catalog")
+        .map(|issue| {
+            (
+                issue["row"].as_str(),
+                issue["field"].as_str(),
+                issue["code"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        issues,
+        [
+            (Some("B"), Some("params.ANT"), Some("allowed_values")),
+            (
+                Some("C"),
+                Some("criteria.POWER"),
+                Some("unsupported_pattern"),
+            ),
+        ],
+        "{report}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn bundle_catalog_schema_uncertainty_preserves_assignment_errors() -> Result<()> {
     let mut snapshot = fixture_snapshot();
     snapshot
@@ -7468,6 +7509,52 @@ async fn bundle_catalog_schema_uncertainty_preserves_assignment_errors() -> Resu
             );
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn bundle_catalog_cached_schema_error_keeps_second_row_diagnostics() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot
+        .parameter_links
+        .push(snapshot.parameter_links[0].clone());
+    let text = concat!(
+        "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n",
+        "A=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15|NULL|1|NEXT|FAIL\"\n",
+        "B=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15&ANT=2|NULL|1|QUIT|FAIL\"\n",
+    );
+    let report = bundle_report_with_snapshot(bundle_arguments(text), snapshot).await?;
+    assert_eq!(report["status"], "invalid", "{report}");
+    let diagnostics = || {
+        report["diagnostics"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|issue| issue["layer"] == "catalog")
+    };
+    for (row, line, code, field) in [
+        ("A", 4, "knowledge_error", "function"),
+        ("B", 5, "knowledge_error", "function"),
+        ("B", 5, "duplicate_key", "params.ANT"),
+    ] {
+        assert!(
+            diagnostics().any(|issue| issue["row"] == row
+                && issue["line"] == line
+                && issue["file"] == "MAIN_FLOW.ini"
+                && issue["section"] == "RUN"
+                && issue["code"] == code
+                && issue["field"] == field),
+            "missing {code} at RUN/{row}:{line}: {report}"
+        );
+    }
+    assert_eq!(
+        diagnostics()
+            .filter(|issue| issue["code"] == "duplicate_key")
+            .count(),
+        1,
+        "{report}"
+    );
     Ok(())
 }
 
