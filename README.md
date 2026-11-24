@@ -318,9 +318,11 @@ unit conversion. An optional `channel` remains unknown until conversion rules
 are audited.
 
 `per_chain` values are one-hot masks `1`, `2`, `4`, and `8`, rather than ordinal
-chain numbers. Coverage can combine otherwise-matching reachable rows for these
-individual masks. `bitmask` compares one literal composite value; `count` cannot
-establish chain coverage. Composite `ANT=15` never proves individual-chain tests.
+chain numbers. All required masks must be covered by otherwise-matching rows on
+one usable execution path; mutually exclusive branches do not combine. Coverage
+remains unknown if unsupported routing or the analysis budget prevents a decision.
+`bitmask` compares one literal composite value; `count` cannot establish chain
+coverage. Composite `ANT=15` never proves individual-chain tests.
 
 Power tolerances use dB. `POWER=1.5dB` represents a symmetric tolerance and
 `POWER=-1~2dB` preserves asymmetric bounds. EVM comparison preserves the supplied

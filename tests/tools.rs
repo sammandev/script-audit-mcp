@@ -6173,6 +6173,78 @@ async fn plan_combines_individual_chain_evidence_without_counting_composite_mask
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_requires_all_individual_chains_on_one_path() -> Result<()> {
+    use serde_json::json;
+    let arguments = tx_plan_arguments();
+    let row = arguments["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let first = row
+        .replace("OFDM6=", "CHAIN1=")
+        .replace("ANT=1,2,4,8", "ANT=1");
+    let second = row
+        .replace("OFDM6=", "CHAIN2=")
+        .replace("ANT=1,2,4,8", "ANT=2");
+    for (selector_fail, first_pass, reachability, validation, status, coverage) in [
+        ("CHAIN1", "CHAIN2", "reachable", "valid", "valid", "matched"),
+        (
+            "CHAIN1",
+            "QUIT",
+            "unreachable",
+            "valid",
+            "invalid",
+            "conflicting",
+        ),
+        (
+            "CHAIN2",
+            "QUIT",
+            "reachable",
+            "valid",
+            "invalid",
+            "conflicting",
+        ),
+        (
+            "CHAIN2",
+            "*E:Routes-After#",
+            "reachable",
+            "incomplete",
+            "incomplete",
+            "unknown",
+        ),
+    ] {
+        let mut request = arguments.clone();
+        request["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+        let selector = row
+            .replace("OFDM6=", "SELECT=")
+            .replace("FREQ=6115", "FREQ=6175")
+            .replace("|QUIT|FAIL", &format!("|CHAIN1|{selector_fail}"));
+        let first = first.replace("|QUIT|FAIL", &format!("|{first_pass}|FAIL"));
+        request["bundle"]["files"][0]["text"] = json!(format!(
+            "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n{selector}\n{first}\n{second}\n"
+        ));
+        let report = plan_report(request).await?;
+        assert_eq!(report["validation"]["status"], validation, "{report}");
+        assert_eq!(
+            report["validation"]["execution"][2]["reachability"],
+            reachability
+        );
+        assert_eq!(
+            report["status"], status,
+            "selector fail={selector_fail}, first pass={first_pass}"
+        );
+        assert_eq!(report["coverage"][0]["status"], coverage, "{report}");
+        assert_eq!(report["ready_for_review"], status == "valid");
+        assert_eq!(
+            report["mandatory"]["matched"],
+            u32::from(coverage == "matched")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_comparison_budget_never_reports_partial_analysis_as_ready() -> Result<()> {
     use serde_json::json;
     let mut arguments = tx_plan_arguments();
