@@ -104,10 +104,6 @@ pub fn parse_script_sections_text(text: &str, source_name: &str) -> ParsedScript
             continue;
         };
 
-        if !raw.contains('=') {
-            continue;
-        }
-
         let Some((label_raw, raw_value, unterminated_quote)) = parse_script_row(raw) else {
             if raw.contains('|') {
                 diagnostics.push(Diagnostic::new(
