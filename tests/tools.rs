@@ -6357,6 +6357,39 @@ async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Resul
     );
     assert_eq!(report["coverage"][0]["status"], "conflicting");
     assert_eq!(report["status"], "invalid");
+    let mut redacted_rate = args.clone();
+    redacted_rate["bundle"]["sensitive_values"] = json!(["MCS7"]);
+    replace_plan_script(
+        &mut redacted_rate,
+        maybe,
+        &maybe.replace("DATA_RATE=OFDM6", "DATA_RATE=MCS7"),
+    );
+    let report = plan_report(redacted_rate).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert!(
+        report["validation"]["execution"][3]["parameters"]
+            .as_str()
+            .is_some_and(|parameters| parameters.contains("DATA_RATE=[REDACTED]"))
+    );
+    assert_eq!(report["coverage"][0]["status"], "unknown");
+    assert_eq!(report["status"], "incomplete");
+    for (frequency, redact_rate, expected) in [
+        ("6.115GHz", false, "unknown"),
+        ("6175", true, "conflicting"),
+    ] {
+        let mut alternate = args.clone();
+        let mut alternate_row = maybe
+            .replace("FREQ=6115", &format!("FREQ={frequency}"))
+            .replace("EVM=-35dB", "EVM=<-35dB");
+        if redact_rate {
+            alternate["bundle"]["sensitive_values"] = json!(["MCS7"]);
+            alternate_row = alternate_row.replace("DATA_RATE=OFDM6", "DATA_RATE=MCS7");
+        }
+        replace_plan_script(&mut alternate, maybe, &alternate_row);
+        let report = plan_report(alternate).await?;
+        assert_eq!(report["validation"]["status"], "valid", "{report}");
+        assert_eq!(report["coverage"][0]["status"], expected, "{report}");
+    }
     replace_plan_script(
         &mut args,
         "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=2",

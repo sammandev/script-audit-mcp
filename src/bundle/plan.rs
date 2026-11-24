@@ -1511,7 +1511,10 @@ impl<'a> Measurement<'a> {
                 continue;
             }
             match (expected, actual) {
-                (Some(expected), Some(actual)) if !super::semantics::has_reference(actual) => {
+                (Some(expected), Some(actual))
+                    if !super::semantics::has_reference(actual)
+                        && !(self.row.redacted && actual.contains("[REDACTED]")) =>
+                {
                     if expected != actual {
                         mismatches.push(format!(
                             "{name}: literal dimension differs from the requirement."
