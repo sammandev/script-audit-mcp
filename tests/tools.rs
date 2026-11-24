@@ -553,6 +553,30 @@ fn unsupported_patterns_and_orphans_are_incomplete_not_valid() -> Result<()> {
 }
 
 #[test]
+fn line_grammar_diagnostics_follow_fixed_field_errors() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions[1].name = "UNAUDITED".into();
+    let engine = Engine::new(snapshot);
+    let mut request = wifi_request();
+    request.function = "UNAUDITED".into();
+    request.timeout = 0;
+    let Err(script_audit_mcp::Error::Validation(issues)) = engine.compose_line(request) else {
+        panic!("expected line validation errors");
+    };
+    let codes = |issues: &[script_audit_mcp::model::Diagnostic]| {
+        issues
+            .iter()
+            .map(|issue| issue.code.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(codes(&issues), ["invalid_timeout", "unsupported_grammar"]);
+    let report = engine.validate_line("DLLWIFI_TEST|UNAUDITED||NULL|0|NEXT|FAIL|", None)?;
+    assert_eq!(report.status, ValidationStatus::Invalid);
+    assert_eq!(codes(&report.diagnostics), codes(&issues));
+    Ok(())
+}
+
+#[test]
 fn engine_references_are_preserved_without_runtime_resolution() -> Result<()> {
     let mut request = wifi_request();
     request
