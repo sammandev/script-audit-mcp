@@ -572,7 +572,7 @@ pub(super) fn compare_checked(
                     }
                     chain_path_conflict = Some(candidates);
                 }
-                ChainPath::SplitAcrossPaths => {}
+                ChainPath::SplitAcrossPaths => matches.rows.extend(partials),
                 ChainPath::NotCovered => {
                     for row in partials {
                         mismatches.push(row, vec!["Individual antenna-chain coverage is incomplete.".into()]);

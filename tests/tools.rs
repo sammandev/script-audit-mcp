@@ -6173,6 +6173,52 @@ async fn plan_combines_individual_chain_evidence_without_counting_composite_mask
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_review_split_chains_cannot_bypass_setup() -> Result<()> {
+    use serde_json::json;
+    let mut args = tx_plan_arguments();
+    let mut setup = args["plan"]["requirements"][0].clone();
+    setup["id"] = json!("SETUP");
+    setup["test"]["frequency"]["value"] = json!(6175);
+    args["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+    args["plan"]["requirements"][0]["depends_on"] = json!(["SETUP"]);
+    args["plan"]["requirements"] = json!([args["plan"]["requirements"][0], setup]);
+    let row = args["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let mut text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n".to_string();
+    for (name, freq, ant, pass, fail) in [
+        ("SELECT", "6235", "1", "EARLY1", "EARLY2"),
+        ("EARLY1", "6115", "1", "SETUP", "FAIL"),
+        ("EARLY2", "6115", "2", "SETUP", "FAIL"),
+        ("SETUP", "6175", "1,2,4,8", "FULL", "FAIL"),
+        ("FULL", "6115", "1,2", "QUIT", "FAIL"),
+    ] {
+        text.push_str(
+            &row.replace("OFDM6=", &format!("{name}="))
+                .replace("FREQ=6115", &format!("FREQ={freq}"))
+                .replace("ANT=1,2,4,8", &format!("ANT={ant}"))
+                .replace("|QUIT|FAIL", &format!("|{pass}|{fail}")),
+        );
+        text.push('\n');
+    }
+    args["bundle"]["files"][0]["text"] = json!(text);
+    let report = plan_report(args).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert_eq!(report["coverage"][1]["status"], "matched", "{report}");
+    assert_eq!(report["coverage"][0]["status"], "conflicting");
+    assert_eq!(report["ready_for_review"], false);
+    assert_eq!(
+        report["coverage"][0]["reasons"],
+        json!([
+            "SETUP: A reachable measurement/procedure can occur before successful completion of its prerequisite."
+        ])
+    );
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_requires_all_individual_chains_on_one_path() -> Result<()> {
     use serde_json::json;
     let arguments = tx_plan_arguments();
