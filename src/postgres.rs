@@ -816,6 +816,75 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mcp")]
+    fn postgres_plan_comparison_and_line_composition_do_not_read_examples() -> Result<()> {
+        use crate::mcp::McpServer;
+        use rmcp::handler::server::wrapper::Parameters;
+        use serde_json::json;
+
+        let fixture = Fixture::new()?;
+        let mut connection = fixture.catalog.connect()?;
+        connection.batch_execute("DELETE FROM criteria_links")?;
+        let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
+        let runtime = tokio::runtime::Runtime::new()?;
+        let comparison: crate::bundle::plan::ComparePlanRequest = serde_json::from_value(json!({
+            "bundle": {
+                "files": [{"name": "MAIN_FLOW.ini", "text": "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"SSH|SENDSTR|payload|NULL|1|QUIT|FAIL\"\n"}],
+                "selected_flow": "[TEST FLOW:Normal]",
+                "dialect": "hh5k"
+            },
+            "plan": {
+                "controlling_source": "plan", "station": "Normal",
+                "sources": [{"id": "plan", "revision": "1", "kind": "test_plan", "approved": true}],
+                "requirements": [{
+                    "id": "SAVE", "applicability": "mandatory",
+                    "provenance": [{"source_id": "plan", "revision": "1", "excerpt": "Save payload"}],
+                    "test": {"purpose": "save", "procedure": {
+                        "device": "SSH", "function": "SENDSTR", "parameters": "payload", "criteria": "NULL"
+                    }}
+                }]
+            },
+            "flow_variant": "normal"
+        }))
+        .map_err(|error| Error::Knowledge(error.to_string()))?;
+        let compose = crate::ComposeRequest {
+            device: "SSH".into(),
+            function: "SENDSTR".into(),
+            params: [("DATA".into(), crate::model::Value::Single("payload".into()))].into(),
+            device_scope: None,
+            criteria: Default::default(),
+            param_sections: Vec::new(),
+            criteria_sections: Vec::new(),
+            timeout: 1,
+            pass_path: None,
+            fail_path: None,
+            error_code: None,
+        };
+        let engine = crate::Engine::new(fixture.catalog.snapshot()?);
+        let expected = [
+            crate::bundle::plan::compare(comparison.clone(), &engine)?,
+            serde_json::to_value(engine.compose_line(compose.clone())?)
+                .map_err(|error| Error::Knowledge(error.to_string()))?,
+        ];
+        assert_eq!(expected[0]["coverage"][0]["status"], "matched");
+        assert_eq!(expected[1]["line"], "SSH|SENDSTR|payload|NULL|1");
+
+        connection.batch_execute("ALTER TABLE examples RENAME TO examples_data")?;
+        let actual = runtime.block_on(async {
+            [
+                server.compare_plan_to_bundle(Parameters(comparison)).await,
+                server.compose_line(Parameters(compose)).await,
+            ]
+        });
+        for (result, expected) in actual.into_iter().zip(expected) {
+            let result = result.map_err(|error| Error::Knowledge(error.to_string()))?;
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+            assert_eq!(result.structured_content, Some(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn postgres_function_snapshot_matches_full_snapshot_lookups() -> Result<()> {
         let fixture = Fixture::empty()?;
         let mut connection = fixture.catalog.connect()?;
