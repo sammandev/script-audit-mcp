@@ -544,11 +544,14 @@ pub(super) fn compare_checked(
                 graph
             });
             let required = expected.iter().fold(0, |bits, mask| bits | mask);
-            let path = validation.execution.first()
+            let confirmed = || partials.iter().map(|&row| {
+                (row, antenna_masks(row).into_iter().fold(0, |bits, mask| bits | mask))
+            });
+            let entry = validation.execution.first()
                 .filter(|_| !budget_exhausted)
-                .filter(|entry| entry.reachability == "reachable")
-                .map_or(ChainPath::Unknown, |entry|
-                    individual_chain_path(&entry.id, required, &partials, graph, &mut chain_budget));
+                .filter(|entry| entry.reachability == "reachable");
+            let path = entry.map_or(ChainPath::Unknown, |entry|
+                individual_chain_path(&entry.id, required, confirmed(), graph, &mut chain_budget));
             match path {
                 ChainPath::Matched(evidence) => {
                     for row in evidence {
@@ -559,18 +562,30 @@ pub(super) fn compare_checked(
                     matches.rows.extend(partials);
                 }
                 ChainPath::SplitAcrossPaths if matches.rows.is_empty() => {
-                    let mut candidates = Candidates::default();
-                    let mut witnessed = HashSet::new();
-                    for row in partials {
-                        if antenna_masks(row).into_iter().filter(|mask| expected.contains(mask))
-                            .any(|mask| witnessed.insert(mask))
-                        {
-                            candidates.push(row, Vec::new());
-                        } else {
-                            candidates.rows.push(row);
+                    let possible_path = !unknown.rows.is_empty() && entry.is_some_and(|entry| {
+                        let possible = unknown.rows.iter().map(|&row| (row, possible_antenna_mask(row, required)));
+                        matches!(
+                            individual_chain_path(&entry.id, required, confirmed().chain(possible), graph, &mut chain_budget),
+                            ChainPath::Matched(_) | ChainPath::Unknown
+                        )
+                    });
+                    if possible_path {
+                        chain_path_unknown = true;
+                        case.reasons.push("Unresolved measurements or the path budget leave single-path antenna-chain coverage unproven.".into());
+                    } else {
+                        let mut candidates = Candidates::default();
+                        let mut witnessed = HashSet::new();
+                        for row in partials {
+                            if antenna_masks(row).into_iter().filter(|mask| expected.contains(mask))
+                                .any(|mask| witnessed.insert(mask))
+                            {
+                                candidates.push(row, Vec::new());
+                            } else {
+                                candidates.rows.push(row);
+                            }
                         }
+                        chain_path_conflict = Some(candidates);
                     }
-                    chain_path_conflict = Some(candidates);
                 }
                 ChainPath::SplitAcrossPaths => matches.rows.extend(partials),
                 ChainPath::NotCovered => {
@@ -1049,18 +1064,13 @@ enum ChainPath<'a> {
 fn individual_chain_path<'a>(
     entry: &str,
     required: u32,
-    candidates: &[&'a ExecutionRow],
+    candidates: impl IntoIterator<Item = (&'a ExecutionRow, u32)>,
     graph: &HashMap<&str, Vec<&super::ExecutionEdge>>,
     budget: &mut usize,
 ) -> ChainPath<'a> {
     let masks: HashMap<_, _> = candidates
-        .iter()
-        .map(|&row| {
-            let bits = antenna_masks(row)
-                .into_iter()
-                .fold(0, |bits, mask| bits | mask);
-            (row.id.as_str(), (row, bits & required))
-        })
+        .into_iter()
+        .map(|(row, bits)| (row.id.as_str(), (row, bits & required)))
         .collect();
     let mut queue = VecDeque::from([(entry, 0, [None; 4])]);
     let mut seen = HashSet::new();
@@ -1119,12 +1129,12 @@ fn individual_chain_path_distinguishes_exhaustion_from_missing_coverage() {
     let graph = HashMap::from([("entry", vec![&edge])]);
     let mut budget = 2;
     assert!(matches!(
-        individual_chain_path("entry", 3, &[], &graph, &mut budget),
+        individual_chain_path("entry", 3, [], &graph, &mut budget),
         ChainPath::Unknown
     ));
     let mut budget = 3;
     assert!(matches!(
-        individual_chain_path("entry", 3, &[], &graph, &mut budget),
+        individual_chain_path("entry", 3, [], &graph, &mut budget),
         ChainPath::NotCovered
     ));
 }
@@ -1655,13 +1665,32 @@ impl<'a> Measurement<'a> {
 }
 
 fn antenna_masks(row: &ExecutionRow) -> Vec<u32> {
-    row.parameters
-        .split('&')
-        .find_map(|assignment| assignment.strip_prefix("ANT="))
+    antenna_value(row)
         .into_iter()
         .flat_map(|value| value.split(','))
         .filter_map(|mask| mask.parse().ok())
         .collect()
+}
+
+fn antenna_value(row: &ExecutionRow) -> Option<&str> {
+    row.parameters
+        .split('&')
+        .find_map(|assignment| assignment.strip_prefix("ANT="))
+}
+
+fn possible_antenna_mask(row: &ExecutionRow, required: u32) -> u32 {
+    let Some(value) = antenna_value(row) else {
+        return required;
+    };
+    let mut bits = 0;
+    for value in value.split(',') {
+        match value.parse::<u32>() {
+            Ok(mask @ (1 | 2 | 4 | 8)) => bits |= mask,
+            Ok(_) => return 0,
+            Err(_) => bits |= required,
+        }
+    }
+    bits
 }
 
 fn quantity(text: &str, unit: &str, implicit_unit: bool) -> Option<f64> {

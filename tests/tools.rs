@@ -6309,6 +6309,49 @@ async fn plan_requires_all_individual_chains_on_one_path() -> Result<()> {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Result<()> {
+    use serde_json::json;
+    let mut args = tx_plan_arguments();
+    args["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+    let row = args["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let mut text = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n".to_string();
+    for (name, freq, ant, pass, fail, evm) in [
+        ("SELECT", "6175", "1", "CHAIN1", "CHAIN2", "<-35"),
+        ("CHAIN1", "6115", "1", "MAYBE", "FAIL", "<-35"),
+        ("CHAIN2", "6115", "2", "QUIT", "FAIL", "<-35"),
+        ("MAYBE", "6115", "2", "QUIT", "FAIL", "-35"),
+    ] {
+        text.push_str(
+            &row.replace("OFDM6=", &format!("{name}="))
+                .replace("FREQ=6115", &format!("FREQ={freq}"))
+                .replace("ANT=1,2,4,8", &format!("ANT={ant}"))
+                .replace("|QUIT|FAIL", &format!("|{pass}|{fail}"))
+                .replace("EVM=<-35dB", &format!("EVM={evm}dB")),
+        );
+        text.push('\n');
+    }
+    args["bundle"]["files"][0]["text"] = json!(text);
+    let report = plan_report(args.clone()).await?;
+    assert_eq!(report["validation"]["status"], "valid", "{report}");
+    assert_eq!(report["coverage"][0]["status"], "unknown");
+    assert_eq!(report["status"], "incomplete");
+    assert_eq!(report["ready_for_review"], false);
+    replace_plan_script(
+        &mut args,
+        "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=2",
+        "MAYBE=\"DLLWIFI_TEST|TX_MULTI_VERIFICATION|BAND=6G&ANT=1",
+    );
+    let report = plan_report(args).await?;
+    assert_eq!(report["coverage"][0]["status"], "conflicting");
+    assert_eq!(report["status"], "invalid");
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_comparison_budget_never_reports_partial_analysis_as_ready() -> Result<()> {
     use serde_json::json;
     let mut arguments = tx_plan_arguments();
