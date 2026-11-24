@@ -690,9 +690,7 @@ fn emit_fields_with_syntax(
                     Severity::Error,
                 ));
             } else {
-                for value in unknown_criterion_values(&raw) {
-                    let _ = check_value_references(value, &key, issues);
-                }
+                check_unknown_criterion_references(value, &raw, &key, issues);
             }
             parts.push(format!("{name}={raw}"));
         } else {
@@ -765,6 +763,30 @@ fn reference_opener(bytes: &[u8], index: usize) -> bool {
     bytes.get(index) == Some(&b'*')
         && bytes.get(index + 1).is_some_and(u8::is_ascii_uppercase)
         && bytes.get(index + 2) == Some(&b':')
+}
+
+fn check_unknown_criterion_references(
+    value: &Value,
+    raw: &str,
+    key: &str,
+    issues: &mut Vec<Diagnostic>,
+) {
+    if let Value::Multiple(items) = value {
+        for item in items {
+            let mut item_issues = Vec::new();
+            let _ = check_value_references(item, key, &mut item_issues);
+            if let Some(error) = item_issues
+                .into_iter()
+                .find(|issue| issue.severity == Severity::Error)
+            {
+                issues.push(error);
+                return;
+            }
+        }
+    }
+    for item in unknown_criterion_values(raw) {
+        let _ = check_value_references(item, key, issues);
+    }
 }
 
 fn unknown_criterion_values(raw: &str) -> impl Iterator<Item = &str> {
