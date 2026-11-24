@@ -359,9 +359,9 @@ pub(crate) fn fixed_issues(
             "timeout",
             "invalid_timeout",
             if timeout_overflowed {
-                "timeout is too large; maximum is 18446744073709551615 milliseconds"
+                format!("timeout is too large; maximum is {} milliseconds", u64::MAX)
             } else {
-                "timeout must be positive integer milliseconds"
+                "timeout must be positive integer milliseconds".to_string()
             },
             Severity::Error,
         ));
