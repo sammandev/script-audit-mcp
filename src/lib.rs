@@ -14,6 +14,7 @@ use model::{
     ComposeRequest, ComposeResult, CriteriaInput, CriteriaSuggestions, Definition, Diagnostic,
     Field, Function, FunctionSchema, Link, Severity, Snapshot, ValidationReport, ValidationStatus,
 };
+pub(crate) use script_checker::parser::common::is_comment as is_commented_line;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -98,7 +99,7 @@ impl Engine {
     ) -> Result<ValidationReport> {
         let segments: Vec<String> = line.split('|').map(str::to_string).collect();
         let mut diagnostics = Vec::new();
-        if script_checker::parser::common::is_comment(line) {
+        if is_commented_line(line) {
             diagnostics.push(grammar::diagnostic(
                 "line",
                 "commented_line",
