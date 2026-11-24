@@ -71,7 +71,7 @@ impl McpServer {
         self.invoke_on(
             move |catalog| match device.as_deref() {
                 Some(device) => catalog.device_snapshot(device),
-                None => catalog.listing_snapshot(),
+                None => catalog.snapshot_without_examples(),
             },
             list,
         )
@@ -149,7 +149,13 @@ impl McpServer {
             engine.validate_line(&request.line, request.device_scope.as_deref())
         };
         if let Some((device, name)) = target {
-            self.invoke_function(device, name, validate).await
+            self.invoke_function_with(
+                device,
+                name,
+                |catalog, device, name| catalog.function_snapshot_without_examples(device, name),
+                validate,
+            )
+            .await
         } else {
             self.invoke_on(|_| Ok(Snapshot::default()), validate).await
         }
@@ -167,7 +173,11 @@ impl McpServer {
             Ok(request) => request,
             Err(error) => return Ok(domain_error(error)),
         };
-        self.invoke(move |engine| request.validate(&engine)).await
+        self.invoke_on(
+            |catalog| catalog.snapshot_without_examples(),
+            move |engine| request.validate(&engine),
+        )
+        .await
     }
 
     #[tool(
@@ -217,13 +227,29 @@ impl McpServer {
         name: String,
         operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.invoke_function_with(
+            device,
+            name,
+            |catalog, device, name| catalog.function_snapshot(device, name),
+            operation,
+        )
+        .await
+    }
+
+    async fn invoke_function_with<Output: Serialize + Send + 'static>(
+        &self,
+        device: String,
+        name: String,
+        load: fn(&dyn Catalog, &str, &str) -> EngineResult<Snapshot>,
+        operation: impl FnOnce(Engine) -> EngineResult<Output> + Send + 'static,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
         self.invoke_on(
             move |catalog| {
                 if crate::device_target(&device).is_err() {
                     // Keep the Engine's response, including validate_line's diagnostic report.
                     return Ok(Snapshot::default());
                 }
-                catalog.function_snapshot(&device, &name)
+                load(catalog, &device, &name)
             },
             operation,
         )

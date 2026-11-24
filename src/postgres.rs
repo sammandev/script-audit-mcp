@@ -86,11 +86,11 @@ impl PostgresCatalog {
 
 impl Catalog for PostgresCatalog {
     fn snapshot(&self) -> Result<Snapshot> {
-        self.read(SnapshotScope::Full)
+        self.read(SnapshotScope::Full, Examples::Read)
     }
 
-    fn listing_snapshot(&self) -> Result<Snapshot> {
-        self.read(SnapshotScope::Listing)
+    fn snapshot_without_examples(&self) -> Result<Snapshot> {
+        self.read(SnapshotScope::Full, Examples::Skip)
     }
 
     fn device_snapshot(&self, device: &str) -> Result<Snapshot> {
@@ -98,27 +98,32 @@ impl Catalog for PostgresCatalog {
         if interface.contains('\0') {
             return Ok(Snapshot::default());
         }
-        self.read(SnapshotScope::Device {
-            source,
-            interface: interface.to_ascii_uppercase(),
-        })
+        self.read(
+            SnapshotScope::Device {
+                source,
+                interface: interface.to_ascii_uppercase(),
+            },
+            Examples::Skip,
+        )
     }
 
     fn function_snapshot(&self, device: &str, name: &str) -> Result<Snapshot> {
-        let Ok((source, interface)) = crate::device_target(device) else {
-            return self.snapshot();
-        };
-        self.read(SnapshotScope::Function {
-            source,
-            interface: interface.to_ascii_uppercase(),
-            name: name.to_ascii_uppercase(),
-        })
+        self.read_function(device, name, Examples::Read)
     }
+
+    fn function_snapshot_without_examples(&self, device: &str, name: &str) -> Result<Snapshot> {
+        self.read_function(device, name, Examples::Skip)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Examples {
+    Read,
+    Skip,
 }
 
 enum SnapshotScope<'a> {
     Full,
-    Listing,
     Device {
         source: &'a str,
         interface: String,
@@ -131,7 +136,21 @@ enum SnapshotScope<'a> {
 }
 
 impl PostgresCatalog {
-    fn read(&self, scope: SnapshotScope<'_>) -> Result<Snapshot> {
+    fn read_function(&self, device: &str, name: &str, examples: Examples) -> Result<Snapshot> {
+        let Ok((source, interface)) = crate::device_target(device) else {
+            return self.read(SnapshotScope::Full, examples);
+        };
+        self.read(
+            SnapshotScope::Function {
+                source,
+                interface: interface.to_ascii_uppercase(),
+                name: name.to_ascii_uppercase(),
+            },
+            examples,
+        )
+    }
+
+    fn read(&self, scope: SnapshotScope<'_>, examples: Examples) -> Result<Snapshot> {
         let mut connection = self.connect()?;
         let mut transaction = connection
             .build_transaction()
@@ -167,7 +186,7 @@ impl PostgresCatalog {
             &scope,
             canonical_dll.as_ref(),
         ) {
-            (SnapshotScope::Full | SnapshotScope::Listing, _) => ("", Vec::new()),
+            (SnapshotScope::Full, _) => ("", Vec::new()),
             (SnapshotScope::Device { source, interface }, Some(canonical_dll)) => (
                 r#" WHERE (source = $1 AND upper(interface COLLATE "C") = $2) OR (source = 'DLL' AND upper(interface COLLATE "C") = $3)"#,
                 vec![source, interface, canonical_dll],
@@ -306,7 +325,7 @@ impl PostgresCatalog {
             &format!("{prefix}criteria_links{linked}"),
             params,
         )?;
-        let examples = if matches!(scope, SnapshotScope::Listing | SnapshotScope::Device { .. }) {
+        let examples = if examples == Examples::Skip {
             Vec::new()
         } else {
             rows(
@@ -695,6 +714,62 @@ mod tests {
         assert_eq!(
             point
                 .structured_content
+                .as_ref()
+                .map(|value| &value["examples"][0]["script"]),
+            Some(&serde_json::json!("SSH|SENDSTR|payload|NULL|1"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn postgres_validation_does_not_read_examples() -> Result<()> {
+        use crate::mcp::{McpServer, SuggestCriteriaRequest, ValidateLineRequest};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let fixture = Fixture::new()?;
+        let mut connection = fixture.catalog.connect()?;
+        let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
+        let runtime = tokio::runtime::Runtime::new()?;
+        let call = |result: std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>| {
+            let result = result.map_err(|error| Error::Knowledge(error.to_string()))?;
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+            Ok::<_, Error>(result.structured_content)
+        };
+        let validate = || {
+            let line = runtime.block_on(server.validate_line(Parameters(ValidateLineRequest {
+                line: "SSH|SENDSTR|payload|NULL|1".into(),
+                device_scope: None,
+            })));
+            let bundle = runtime.block_on(server.validate_ini_bundle(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "files": [{"name": "MAIN_FLOW.ini", "text": "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"SSH|SENDSTR|payload|NULL|1|NEXT|FAIL\"\n"}],
+                    "selected_flow": "[TEST FLOW:Normal]",
+                    "dialect": "hh5k"
+                }))
+                .map_err(|error| Error::Knowledge(error.to_string()))?,
+            )));
+            Ok::<_, Error>((call(line)?, call(bundle)?))
+        };
+        let original = validate()?;
+        assert_eq!(
+            original.0.as_ref().map(|report| &report["segments"][1]),
+            Some(&serde_json::json!("SENDSTR"))
+        );
+
+        connection.batch_execute("ALTER TABLE examples RENAME TO examples_data")?;
+        assert_eq!(validate()?, original);
+
+        connection.batch_execute("ALTER TABLE examples_data RENAME TO examples")?;
+        let suggestions = call(runtime.block_on(server.suggest_criteria(Parameters(
+            SuggestCriteriaRequest {
+                device: "SSH".into(),
+                function: "SENDSTR".into(),
+                device_scope: None,
+            },
+        ))))?;
+        assert_eq!(
+            suggestions
                 .as_ref()
                 .map(|value| &value["examples"][0]["script"]),
             Some(&serde_json::json!("SSH|SENDSTR|payload|NULL|1"))
