@@ -6444,6 +6444,72 @@ async fn plan_review_unresolved_row_can_complete_split_chain_coverage() -> Resul
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn plan_individual_chain_coverage_follows_macro_returns() -> Result<()> {
+    use serde_json::json;
+
+    let mut arguments = tx_plan_arguments();
+    arguments["plan"]["requirements"][0]["test"]["chains"]["value"] = json!([1, 2]);
+    let row = arguments["bundle"]["files"][0]["text"]
+        .as_str()
+        .and_then(|text| text.lines().last())
+        .unwrap_or_default();
+    let selector = row
+        .replace("OFDM6=", "SELECT=")
+        .replace("FREQ=6115", "FREQ=6175")
+        .replace("|QUIT|FAIL", "|CALL|CHAIN2");
+    let chain1 = row
+        .replace("OFDM6=", "CHAIN1=")
+        .replace("ANT=1,2,4,8", "ANT=1");
+    let chain2 = row
+        .replace("OFDM6=", "CHAIN2=")
+        .replace("ANT=1,2,4,8", "ANT=2");
+
+    for (return_target, expected) in [("CHAIN2", "matched"), ("QUIT", "conflicting")] {
+        arguments["bundle"]["files"] = json!([
+            {"name": "MAIN_FLOW.ini", "text": format!(
+                "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\n{selector}\nCALL=\"MACRO|MEASURE|NULL|NULL|1|{return_target}|FAIL\"\n{chain2}\n"
+            )},
+            {"name": "MACRO_LIST.ini", "text": format!("[MEASURE]\n{chain1}\n")}
+        ]);
+        let report = plan_report(arguments.clone()).await?;
+        let validation = &report["validation"];
+        assert_eq!(validation["status"], "valid", "{validation}");
+        let row_id = |name: &str| {
+            validation["execution"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|row| row["row"] == name)
+                .map(|row| row["id"].clone())
+                .ok_or_else(|| script_audit_mcp::Error::Knowledge(format!("missing row {name}")))
+        };
+        let has_edge = |kind, source, target| {
+            validation["execution_edges"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|edge| {
+                    edge["kind"] == kind
+                        && edge["source"] == source
+                        && edge["target"] == target
+                        && edge["certainty"] == "supported"
+                })
+        };
+        assert!(has_edge("macro_call", row_id("CALL")?, row_id("CHAIN1")?));
+        let return_id = if return_target == "CHAIN2" {
+            row_id("CHAIN2")?
+        } else {
+            json!("terminal:QUIT")
+        };
+        assert!(has_edge("macro_success", row_id("CHAIN1")?, return_id));
+        assert_eq!(report["coverage"][0]["status"], expected, "{report}");
+        assert_eq!(report["ready_for_review"], expected == "matched");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn plan_chain_path_budget_does_not_depend_on_requirement_order() -> Result<()> {
     use serde_json::json;
 
