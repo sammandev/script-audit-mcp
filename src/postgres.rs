@@ -736,22 +736,30 @@ mod tests {
             assert_ne!(result.is_error, Some(true), "{result:?}");
             Ok::<_, Error>(result.structured_content)
         };
+        let line = "SSH|SENDSTR|payload|NULL|1";
+        let bundle: crate::bundle::ValidateBundleRequest = serde_json::from_value(serde_json::json!({
+            "files": [{"name": "MAIN_FLOW.ini", "text": "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"SSH|SENDSTR|payload|NULL|1|NEXT|FAIL\"\n"}],
+            "selected_flow": "[TEST FLOW:Normal]",
+            "dialect": "hh5k"
+        }))
+        .map_err(|error| Error::Knowledge(error.to_string()))?;
         let validate = || {
-            let line = runtime.block_on(server.validate_line(Parameters(ValidateLineRequest {
-                line: "SSH|SENDSTR|payload|NULL|1".into(),
-                device_scope: None,
-            })));
-            let bundle = runtime.block_on(server.validate_ini_bundle(Parameters(
-                serde_json::from_value(serde_json::json!({
-                    "files": [{"name": "MAIN_FLOW.ini", "text": "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nA=\"SSH|SENDSTR|payload|NULL|1|NEXT|FAIL\"\n"}],
-                    "selected_flow": "[TEST FLOW:Normal]",
-                    "dialect": "hh5k"
-                }))
-                .map_err(|error| Error::Knowledge(error.to_string()))?,
-            )));
-            Ok::<_, Error>((call(line)?, call(bundle)?))
+            let line_report =
+                runtime.block_on(server.validate_line(Parameters(ValidateLineRequest {
+                    line: line.into(),
+                    device_scope: None,
+                })));
+            let bundle_report =
+                runtime.block_on(server.validate_ini_bundle(Parameters(bundle.clone())));
+            Ok::<_, Error>((call(line_report)?, call(bundle_report)?))
         };
         let original = validate()?;
+        let engine = crate::Engine::new(fixture.catalog.snapshot()?);
+        let full_snapshot_reports = (
+            serde_json::to_value(engine.validate_line(line, None)?).ok(),
+            serde_json::to_value(crate::bundle::validate(bundle.clone(), &engine)?).ok(),
+        );
+        assert_eq!(original, full_snapshot_reports);
         assert_eq!(
             original.0.as_ref().map(|report| &report["segments"][1]),
             Some(&serde_json::json!("SENDSTR"))
