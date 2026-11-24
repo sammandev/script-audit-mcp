@@ -309,6 +309,55 @@ fn suggest_criteria_returns_known_patterns_and_examples() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn suggest_criteria_ignores_ambiguous_parameter_definitions() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.parameter_definitions.push(Definition {
+        device_name: "wifi_test".into(),
+        ..snapshot.parameter_definitions[0].clone()
+    });
+    let engine = Engine::new(snapshot);
+    let device = "DLLWIFI_TEST";
+    let name = "TX_MULTI_VERIFICATION";
+
+    assert!(matches!(
+        engine.get_function(device, name, None),
+        Err(script_audit_mcp::Error::Knowledge(message)) if message == "ambiguous definition for ANT"
+    ));
+    let suggestions = engine.suggest_criteria(device, name, None)?;
+    assert_eq!(suggestions.criteria.len(), 1);
+    assert_eq!(suggestions.criteria[0].name, "POWER");
+    assert_eq!(suggestions.examples.len(), 1);
+    assert_eq!(
+        suggestions.examples[0].script,
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|"
+    );
+    Ok(())
+}
+
+#[test]
+fn suggest_criteria_preserves_criteria_and_scope_errors() {
+    let mut snapshot = fixture_snapshot();
+    for scope in ["WIFI_TEST", "wifi_test"] {
+        snapshot.criteria_definitions.push(Definition {
+            device_name: scope.into(),
+            ..snapshot.criteria_definitions[0].clone()
+        });
+    }
+    let engine = Engine::new(snapshot);
+    let device = "DLLWIFI_TEST";
+    let name = "TX_MULTI_VERIFICATION";
+
+    assert!(matches!(
+        engine.suggest_criteria(device, name, None),
+        Err(script_audit_mcp::Error::Knowledge(message)) if message == "ambiguous definition for POWER"
+    ));
+    assert!(matches!(
+        engine.suggest_criteria(device, name, Some("WIFI_TEST ")),
+        Err(script_audit_mcp::Error::InvalidInput { field, .. }) if field == "device_scope"
+    ));
+}
+
 fn wifi_request() -> ComposeRequest {
     ComposeRequest {
         device: "DLLWIFI_TEST".into(),

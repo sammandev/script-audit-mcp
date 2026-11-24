@@ -294,10 +294,11 @@ impl Engine {
         function: &str,
         device_scope: Option<&str>,
     ) -> Result<CriteriaSuggestions> {
-        let schema = self.get_function(device, function, device_scope)?;
+        let function = self.resolve_function(device, function)?;
+        let scope = resolve_device_scope(function, device_scope)?;
         Ok(CriteriaSuggestions {
-            criteria: schema.criteria,
-            examples: schema.examples,
+            criteria: self.linked_criteria(function, &scope)?,
+            examples: self.function_examples(function, &scope),
         })
     }
 
@@ -317,8 +318,14 @@ impl Engine {
         device_scope: Option<&str>,
     ) -> Result<FunctionSchema> {
         let mut schema = self.linked_schema(function, device_scope)?;
-        schema.examples = self
-            .snapshot
+        schema.examples = self.function_examples(function, &schema.device_scope);
+        schema.diagnostics = grammar::support_issues(&schema);
+        schema.function.composition_supported = schema.diagnostics.is_empty();
+        Ok(schema)
+    }
+
+    fn function_examples(&self, function: &Function, scope: &str) -> Vec<model::Example> {
+        self.snapshot
             .examples
             .iter()
             .filter(|example| {
@@ -328,9 +335,7 @@ impl Engine {
                     return false;
                 }
                 if !example.device_name.is_empty()
-                    && !example
-                        .device_name
-                        .eq_ignore_ascii_case(&schema.device_scope)
+                    && !example.device_name.eq_ignore_ascii_case(scope)
                     && !example
                         .device_name
                         .eq_ignore_ascii_case(&function.interface)
@@ -345,10 +350,7 @@ impl Engine {
                     .is_ok_and(|resolved| std::ptr::eq(resolved, function))
             })
             .cloned()
-            .collect();
-        schema.diagnostics = grammar::support_issues(&schema);
-        schema.function.composition_supported = schema.diagnostics.is_empty();
-        Ok(schema)
+            .collect()
     }
 
     fn linked_schema(
@@ -356,29 +358,14 @@ impl Engine {
         function: &Function,
         device_scope: Option<&str>,
     ) -> Result<FunctionSchema> {
-        let scope = device_scope
-            .unwrap_or(&function.interface)
-            .to_ascii_uppercase();
-        if scope.is_empty() || scope.trim() != scope || scope.contains(['|', '\r', '\n']) {
-            return Err(Error::InvalidInput {
-                field: "device_scope".into(),
-                message:
-                    "scope must not be empty or contain surrounding whitespace, pipes, or line breaks"
-                        .into(),
-            });
-        }
+        let scope = resolve_device_scope(function, device_scope)?;
         let parameters = select_fields(
             &self.snapshot.parameter_links,
             &self.snapshot.parameter_definitions,
             function,
             &scope,
         )?;
-        let criteria = select_fields(
-            &self.snapshot.criteria_links,
-            &self.snapshot.criteria_definitions,
-            function,
-            &scope,
-        )?;
+        let criteria = self.linked_criteria(function, &scope)?;
         Ok(FunctionSchema {
             function: function.clone(),
             device_scope: scope,
@@ -387,6 +374,15 @@ impl Engine {
             examples: Vec::new(),
             diagnostics: Vec::new(),
         })
+    }
+
+    fn linked_criteria(&self, function: &Function, scope: &str) -> Result<Vec<Field>> {
+        select_fields(
+            &self.snapshot.criteria_links,
+            &self.snapshot.criteria_definitions,
+            function,
+            scope,
+        )
     }
 
     fn resolve_function(&self, device: &str, name: &str) -> Result<&Function> {
@@ -457,6 +453,21 @@ impl Engine {
         });
         Ok(functions)
     }
+}
+
+fn resolve_device_scope(function: &Function, device_scope: Option<&str>) -> Result<String> {
+    let scope = device_scope
+        .unwrap_or(&function.interface)
+        .to_ascii_uppercase();
+    if scope.is_empty() || scope.trim() != scope || scope.contains(['|', '\r', '\n']) {
+        return Err(Error::InvalidInput {
+            field: "device_scope".into(),
+            message:
+                "scope must not be empty or contain surrounding whitespace, pipes, or line breaks"
+                    .into(),
+        });
+    }
+    Ok(scope)
 }
 
 fn function_lookup_key<'a>(
