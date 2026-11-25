@@ -12,6 +12,7 @@ BINARY="$INSTALL_DIR/bin/script-audit-mcp"
 ENV_FILE="$INSTALL_DIR/etc/script-audit-mcp.env"
 UNIT=/etc/systemd/system/script-audit-mcp.service
 NGINX_SITE=/etc/nginx/sites-available/script-audit-mcp
+NGINX_ENABLED_SITE=/etc/nginx/sites-enabled/script-audit-mcp
 BACKUP_ROOT="$INSTALL_DIR/backups"
 PUBLIC_LISTENER=10.176.2.139:39064
 PRIVATE_LISTENER=127.0.0.1:39065
@@ -69,6 +70,13 @@ check_installation() {
     sudo test ! -L "$BINARY"
     sudo test -f "$ENV_FILE"
     sudo test -f "$NGINX_SITE"
+    sudo test -L "$NGINX_ENABLED_SITE" ||
+        fail "Nginx site is not enabled. Link $NGINX_ENABLED_SITE to $NGINX_SITE, test and reload Nginx."
+    actual="$(sudo readlink -e -- "$NGINX_ENABLED_SITE")"
+    [[ "$actual" == "$NGINX_SITE" ]] ||
+        fail "Nginx enabled-site link resolves to $actual, expected $NGINX_SITE."
+    sudo systemctl is-active --quiet nginx ||
+        fail 'Nginx service is not active. Start Nginx, then rerun status or update.'
     ok "Installation matches the approved unit, account, listener and file layout."
     detail Unit "$UNIT"
     detail Binary "$BINARY"

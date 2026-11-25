@@ -7,9 +7,9 @@ trap 'report_failure Rollback "$LINENO" "${BACKUP:-}"' ERR
 
 step 'Preflight checks'
 operator_only
-require_commands realpath nginx ss awk sha256sum stat
+require_commands realpath readlink nginx ss awk sha256sum stat
 require_smoke_runtime
-ok 'Required commands are available (nginx, ss, awk, realpath, python3 >= 3.10, curl).'
+ok 'Required commands are available (nginx, ss, awk, realpath, readlink, python3 >= 3.10, curl).'
 check_installation
 lock_deployment
 SELECTED="$(sudo realpath -e -- "$1")"

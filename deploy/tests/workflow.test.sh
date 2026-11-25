@@ -29,6 +29,7 @@ run_task() (
     require_smoke_runtime() { :; }
     describe_binary() { :; }
     check_installation() { log preflight; [[ "$scenario" != preflight-fails ]]; }
+    check_listeners() { log listeners; }
     lock_deployment() { log lock; }
     cleanup_staged() { log cleanup; }
     make_backup() { log backup; BACKUP="$BACKUP_ROOT/new-backup"; }
@@ -77,23 +78,23 @@ assert_trace() {
 }
 
 run_case update success
-assert_trace 'operator,preflight,lock,is-active,nginx,build,backup,replace,restart,verify,cleanup'
-echo 'PASS: update builds before backup and replacement, then verifies restart'
+assert_trace 'operator,preflight,lock,is-active,nginx,reload,listeners,build,backup,replace,restart,verify,cleanup'
+echo 'PASS: update reloads and verifies Nginx before building, then verifies the MCP restart'
 
 if run_case update preflight-fails; then exit 1; fi
 assert_trace 'operator,preflight'
 echo 'PASS: preflight failure makes no deployment changes'
 
 if run_case update build-fails; then exit 1; fi
-assert_trace 'operator,preflight,lock,is-active,nginx,build,cleanup'
+assert_trace 'operator,preflight,lock,is-active,nginx,reload,listeners,build,cleanup'
 echo 'PASS: build failure leaves installed binary untouched'
 
 if run_case update replace-fails; then exit 1; fi
-assert_trace 'operator,preflight,lock,is-active,nginx,build,backup,replace,cleanup'
+assert_trace 'operator,preflight,lock,is-active,nginx,reload,listeners,build,backup,replace,cleanup'
 echo 'PASS: replacement failure does not restart service'
 
 if run_case update smoke-fails; then exit 1; fi
-assert_trace 'operator,preflight,lock,is-active,nginx,build,backup,replace,restart,verify,cleanup'
+assert_trace 'operator,preflight,lock,is-active,nginx,reload,listeners,build,backup,replace,restart,verify,cleanup'
 echo 'PASS: smoke failure returns failure without automatic rollback'
 
 run_case rollback success /opt/script-audit-mcp/backups/old-backup <<<ROLLBACK

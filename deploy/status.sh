@@ -6,7 +6,7 @@ plan_steps 5
 
 step 'Installation'
 operator_only
-require_commands ss nginx sha256sum stat awk
+require_commands ss nginx readlink sha256sum stat awk
 check_installation
 
 step 'Service'

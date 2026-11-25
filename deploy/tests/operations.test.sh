@@ -13,8 +13,15 @@ sudo() {
             --property=ExecStart) echo "{ argv[]=$BINARY --http --host ${TEST_HOST:-127.0.0.1} --port 39065 ; }" ;;
             *) return 1 ;;
         esac
+    elif [[ "$1" == systemctl && "$2" == is-active && "$3" == --quiet && "$4" == nginx ]]; then
+        [[ "${TEST_NGINX_INACTIVE:-no}" != yes ]]
     elif [[ "$1" == test ]]; then
+        if [[ "${TEST_MISSING_NGINX_LINK:-no}" == yes && "$2" == -L && "$3" == /etc/nginx/sites-enabled/script-audit-mcp ]]; then
+            return 1
+        fi
         return 0
+    elif [[ "$1" == readlink ]]; then
+        printf '%s\n' "$NGINX_SITE"
     elif [[ "$1" == ss ]]; then
         printf 'LISTEN 0 128 %s:39065 0.0.0.0:* users:(("script-audit-mc",pid=1,fd=6))\n' "${TEST_HOST:-127.0.0.1}"
         if [[ "${TEST_MISSING_PROXY:-no}" != yes ]]; then
@@ -28,6 +35,14 @@ sudo() {
 
 check_installation
 echo 'PASS: approved installation accepted'
+if (TEST_MISSING_NGINX_LINK=yes; check_installation); then
+    fail 'Missing enabled Nginx site was accepted.'
+fi
+echo 'PASS: missing enabled Nginx site rejected'
+if (TEST_NGINX_INACTIVE=yes; check_installation); then
+    fail 'Inactive Nginx service was accepted.'
+fi
+echo 'PASS: inactive Nginx service rejected'
 if (TEST_HOST=0.0.0.0; check_installation); then
     fail "Unexpected ExecStart was accepted."
 fi

@@ -394,16 +394,19 @@ release provenance before restoring it.
 
 Requirements: Bash, the approved Rust toolchain, sudo, systemd, Nginx, curl,
 Python 3.10 or newer, and standard Ubuntu utilities (`flock`, `ss`, `awk`,
-`realpath`, and coreutils). Python uses only its standard library; no pip
-installation is needed. Scripts never install dependencies, transfer source,
+`readlink`, `realpath`, and coreutils). Python uses only its standard library;
+no pip installation is needed. Scripts never install dependencies, transfer source,
 access the database directly, or migrate it. `mcp-smoke.sh --help` describes
 the optional URL and tool arguments; the URL must be this deployment's approved
 Nginx endpoint, not the private listener, because the proxy rejection checks
 are mandatory. Smoke checks can also be run on an intended LAN/VPN client.
 
-Updates and rollbacks are deliberately **binary-only**. They refuse unexpected
-unit paths, service accounts, environment-file paths, or ExecStart settings.
-They preserve the installed unit, environment, Nginx site, and database.
+Updates and rollbacks are deliberately **binary-only**: they preserve the
+installed unit, environment, Nginx site, and database. Preflight refuses a site
+that is not enabled, an inactive Nginx service, or an unexpected unit path,
+service account, environment-file path, or ExecStart setting. An update tests
+and gracefully reloads the existing Nginx configuration, then verifies the
+approved public and private listeners before building or replacing the binary.
 Backups are root-only, outside the repository, and include the binary, unit,
 environment, Nginx site, and unit drop-ins if present. They are not marked as
 verified releases automatically. Configuration changes or first installation

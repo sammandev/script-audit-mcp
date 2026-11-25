@@ -7,9 +7,9 @@ trap 'report_failure Update "$LINENO" "${BACKUP:-}"' ERR
 
 step 'Preflight checks'
 operator_only
-require_commands cargo rustc nginx ss awk sha256sum stat
+require_commands cargo rustc nginx ss awk readlink sha256sum stat
 require_smoke_runtime
-ok 'Required commands are available (cargo, rustc, nginx, ss, awk, python3 >= 3.10, curl).'
+ok 'Required commands are available (cargo, rustc, nginx, ss, awk, readlink, python3 >= 3.10, curl).'
 check_installation
 lock_deployment
 sudo systemctl is-active --quiet "$SERVICE" || fail "Service is not active. Diagnose it before updating."
@@ -17,6 +17,9 @@ ok "Service $SERVICE is active."
 describe_binary 'Current binary' "$BINARY"
 run_indented sudo nginx -t
 ok 'Nginx configuration test passed.'
+sudo systemctl reload nginx
+ok 'Nginx configuration reloaded.'
+check_listeners
 trap cleanup_staged EXIT
 
 step 'Build release binary'
