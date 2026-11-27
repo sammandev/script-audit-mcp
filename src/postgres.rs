@@ -114,6 +114,39 @@ impl Catalog for PostgresCatalog {
     fn function_snapshot_without_examples(&self, device: &str, name: &str) -> Result<Snapshot> {
         self.read_function(device, name, Examples::Skip)
     }
+
+    fn interfaces(&self) -> Result<Vec<(String, String)>> {
+        let mut connection = self.connect()?;
+        let (mut transaction, contract) = read_only(&mut connection)?;
+        let prefix = if contract { "mcp_v1_" } else { "" };
+        let interfaces = rows(
+            &mut transaction,
+            &format!(
+                "SELECT DISTINCT source, interface FROM {prefix}functions ORDER BY source, interface"
+            ),
+            &[],
+            |row| Ok((row.try_get("source")?, row.try_get("interface")?)),
+        )?;
+        transaction.commit()?;
+        Ok(interfaces)
+    }
+}
+
+/// Starts a read-only snapshot transaction and reports whether the `mcp_v1_*` contract exists.
+fn read_only(connection: &mut Client) -> Result<(Transaction<'_>, bool)> {
+    let mut transaction = connection
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()?;
+    transaction.batch_execute("SET LOCAL statement_timeout = '15s'")?;
+    // Catalogs carrying the web ADR-0012 contract expose `mcp_v1_*` views
+    // with audited grammar; older catalogs fall back to the base tables
+    // and the built-in grammar profiles.
+    let contract: bool = transaction
+        .query_one("SELECT to_regclass('mcp_v1_functions') IS NOT NULL", &[])?
+        .try_get(0)?;
+    Ok((transaction, contract))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -152,18 +185,7 @@ impl PostgresCatalog {
 
     fn read(&self, scope: SnapshotScope<'_>, examples: Examples) -> Result<Snapshot> {
         let mut connection = self.connect()?;
-        let mut transaction = connection
-            .build_transaction()
-            .isolation_level(IsolationLevel::RepeatableRead)
-            .read_only(true)
-            .start()?;
-        transaction.batch_execute("SET LOCAL statement_timeout = '15s'")?;
-        // Catalogs carrying the web ADR-0012 contract expose `mcp_v1_*` views
-        // with audited grammar; older catalogs fall back to the base tables
-        // and the built-in grammar profiles.
-        let contract: bool = transaction
-            .query_one("SELECT to_regclass('mcp_v1_functions') IS NOT NULL", &[])?
-            .try_get(0)?;
+        let (mut transaction, contract) = read_only(&mut connection)?;
         let prefix = if contract { "mcp_v1_" } else { "" };
         let grammar_columns = if contract {
             ", grammar_encoding, grammar_scope"
@@ -691,7 +713,9 @@ mod tests {
         let server = McpServer::new(std::sync::Arc::new(fixture.catalog.clone()));
         let runtime = tokio::runtime::Runtime::new()?;
         let full = crate::Engine::new(fixture.catalog.snapshot()?);
-        let original = serde_json::json!({"functions": full.list_functions(None)?});
+        let original =
+            serde_json::to_value(full.list_function_rows(&ListFunctionsRequest::default())?)
+                .map_err(|error| Error::Knowledge(error.to_string()))?;
         assert_eq!(original["functions"][0]["name"], "SENDSTR");
 
         connection.batch_execute("ALTER TABLE examples RENAME TO examples_data")?;
@@ -979,11 +1003,12 @@ mod tests {
                 assert_eq!(snapshot.functions.len(), function_count, "{device:?}");
                 assert!(snapshot.examples.is_empty(), "{device:?}");
                 let scoped = crate::Engine::new(snapshot);
-                assert_eq!(
-                    serde_json::json!(scoped.list_functions(Some(device))?),
-                    serde_json::json!(full.list_functions(Some(device))?),
-                    "{device:?}",
-                );
+                // Scoped snapshots cannot suggest other devices, so compare error codes only.
+                let listed = |engine: &crate::Engine| match engine.list_functions(Some(device)) {
+                    Ok(functions) => serde_json::json!(functions),
+                    Err(error) => serde_json::json!(error.code()),
+                };
+                assert_eq!(listed(&scoped), listed(&full), "{device:?}");
             }
             let wifi = catalog.device_snapshot("DLLWIFI_TEST")?;
             assert_eq!(wifi.parameter_definitions.len(), 3);

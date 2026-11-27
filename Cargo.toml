@@ -37,3 +37,6 @@ required-features = ["database", "mcp"]
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+[dev-dependencies]
+jsonschema = { version = "0.63.2", default-features = false }

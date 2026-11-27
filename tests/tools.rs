@@ -125,6 +125,896 @@ fn list_functions_filters_script_device_and_exposes_convention() -> Result<()> {
     Ok(())
 }
 
+fn error_candidates<Output: std::fmt::Debug>(result: Result<Output>) -> (String, Vec<String>) {
+    match result {
+        Err(error) => (error.code().to_string(), error.candidates().to_vec()),
+        Ok(output) => panic!("expected an error, got {output:?}"),
+    }
+}
+
+#[test]
+fn unknown_script_devices_suggest_close_script_devices() -> Result<()> {
+    let engine = fixture();
+    let unknown = |candidates: &[&str]| {
+        (
+            "unknown_device".to_string(),
+            candidates
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        error_candidates(engine.list_functions(Some("WIFI_TEST"))),
+        unknown(&["DLLWIFI_TEST"])
+    );
+    assert_eq!(
+        error_candidates(engine.list_functions(Some("dllwifi_test"))),
+        unknown(&["DLLWIFI_TEST"])
+    );
+    assert_eq!(
+        error_candidates(engine.list_functions(Some("WIFI"))),
+        unknown(&["DLLWIFI_TEST"])
+    );
+    assert_eq!(
+        error_candidates(engine.list_functions(Some("DLLSSH"))),
+        unknown(&["SSH"])
+    );
+    assert_eq!(
+        error_candidates(engine.list_functions(Some("NOTHING_LIKE_IT"))),
+        unknown(&[])
+    );
+    assert_eq!(
+        error_candidates(engine.list_functions(Some(""))),
+        ("invalid_input".to_string(), Vec::new())
+    );
+    assert_eq!(
+        error_candidates(engine.list_functions(Some("SSH#QUICK"))),
+        ("invalid_input".to_string(), Vec::new())
+    );
+    let unknown_device_function = engine
+        .get_function("WIFI_TEST", "TX_MULTI_VERIFICATION", None)
+        .map(|_| ());
+    assert_eq!(
+        error_candidates(unknown_device_function),
+        (
+            "unknown_function".to_string(),
+            vec!["DLLWIFI_TEST".to_string()]
+        )
+    );
+    let missing_function = engine.suggest_criteria("SSH", "MISSING", None).map(|_| ());
+    assert!(
+        missing_function
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "unknown function: SSH/MISSING")
+    );
+    assert_eq!(
+        error_candidates(missing_function),
+        ("unknown_function".to_string(), Vec::new())
+    );
+    assert_eq!(engine.list_functions(Some("ssh"))?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn interface_names_alias_only_their_single_script_device() -> Result<()> {
+    use script_audit_mcp::devices::{DeviceMatch, MatchedBy};
+    let engine = fixture();
+    assert_eq!(
+        engine.resolve_device("DLLWIFI_TEST#QUICK")?,
+        DeviceMatch {
+            script_device: "DLLWIFI_TEST#QUICK".into(),
+            matched_by: MatchedBy::ScriptDevice
+        }
+    );
+    assert_eq!(
+        engine.resolve_device("wifi_test")?,
+        DeviceMatch {
+            script_device: "DLLWIFI_TEST".into(),
+            matched_by: MatchedBy::Interface
+        }
+    );
+    assert_eq!(
+        error_candidates(engine.resolve_device("WIFI")),
+        (
+            "unknown_device".to_string(),
+            vec!["DLLWIFI_TEST".to_string()]
+        )
+    );
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions.push(Function {
+        source: "BUILT-IN".into(),
+        interface: "WIFI_TEST".into(),
+        name: "PING".into(),
+        convention: Some(1),
+        ..Function::default()
+    });
+    assert_eq!(
+        Engine::new(snapshot)
+            .resolve_device("WIFI_TEST")?
+            .matched_by,
+        MatchedBy::ScriptDevice
+    );
+    Ok(())
+}
+
+#[test]
+fn list_devices_reports_each_reachable_script_device_once() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions.extend([
+        Function {
+            source: "BUILT-IN".into(),
+            interface: "ssh".into(),
+            name: "CLOSE".into(),
+            convention: Some(1),
+            ..Function::default()
+        },
+        Function {
+            source: "DLL".into(),
+            interface: "WIFI_TEST#INVALID".into(),
+            name: "UNREACHABLE".into(),
+            convention: Some(2),
+            ..Function::default()
+        },
+    ]);
+    let engine = Engine::new(snapshot);
+    let devices = engine.list_devices()?;
+    let rows: Vec<_> = devices
+        .iter()
+        .map(|row| {
+            (
+                row.script_device.as_str(),
+                row.source.as_str(),
+                row.interface.as_str(),
+                row.mode_suffixes.clone(),
+                row.function_count,
+                row.composable_count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("SSH", "BUILT-IN", "SSH", vec![], 2, 1),
+            (
+                "DLLWIFI_TEST",
+                "DLL",
+                "WIFI_TEST",
+                vec!["QUICK".to_string(), "PROXY".to_string()],
+                1,
+                1
+            ),
+        ]
+    );
+    for row in &devices {
+        let functions = engine.list_functions(Some(&row.script_device))?;
+        assert_eq!(functions.len(), row.function_count);
+        assert_eq!(
+            functions
+                .iter()
+                .filter(|function| function.composition_supported)
+                .count(),
+            row.composable_count
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn function_readiness_mirrors_the_web_readiness_verdicts() -> Result<()> {
+    use script_audit_mcp::discovery::Readiness;
+    use script_audit_mcp::model::{AuditedGrammar, ScriptKeyAudit};
+
+    let mut snapshot = fixture_snapshot();
+    let named = |name: &str, scope: &str, keys: Vec<ScriptKeyAudit>| Function {
+        source: "DLL".into(),
+        interface: "WIFI_TEST".into(),
+        name: name.into(),
+        convention: Some(2),
+        audited_grammar: Some(AuditedGrammar {
+            encoding: "named".into(),
+            scope: scope.into(),
+            script_keys: keys,
+        }),
+        ..Function::default()
+    };
+    let key = |name: &str, scope: &str| ScriptKeyAudit {
+        criterion: false,
+        name: name.into(),
+        scope: scope.into(),
+    };
+    snapshot.functions.extend([
+        named("BUNDLE_ONLY", "bundle", vec![key("ANT", "bundle")]),
+        named("UNAUDITED", "line", vec![]),
+        Function {
+            source: "DLL".into(),
+            interface: "WIFI_TEST".into(),
+            name: "NO_PROFILE".into(),
+            convention: Some(2),
+            ..Function::default()
+        },
+    ]);
+    for function in ["BUNDLE_ONLY", "UNAUDITED"] {
+        snapshot.parameter_links.push(Link {
+            name: "ANT".into(),
+            function_source: "DLL".into(),
+            function_name: function.into(),
+            device_name: "WIFI_TEST".into(),
+            position: Some(1),
+            required: true,
+        });
+    }
+    let engine = Engine::new(snapshot);
+
+    let ready = engine.function_readiness("DLLWIFI_TEST", "TX_MULTI_VERIFICATION", None)?;
+    assert_eq!(ready.status, Readiness::Ready);
+    assert!(ready.line.ready && ready.bundle.ready);
+    assert_eq!(ready.script_device, "DLLWIFI_TEST");
+    assert_eq!(ready.parameters[0].name, "ANT");
+    assert!(ready.parameters[0].has_definition);
+    assert!(
+        engine
+            .list_functions(Some("DLLWIFI_TEST"))?
+            .iter()
+            .any(|function| function.name == "TX_MULTI_VERIFICATION"
+                && function.composition_supported),
+        "line readiness agrees with composition support"
+    );
+
+    let bundle = engine.function_readiness("DLLWIFI_TEST", "BUNDLE_ONLY", None)?;
+    assert_eq!(bundle.status, Readiness::BundleReady);
+    assert!(!bundle.line.ready && bundle.bundle.ready);
+    assert_eq!(
+        bundle.parameters[0].script_key_scope.as_deref(),
+        Some("bundle")
+    );
+    let grammar = bundle.grammar.as_ref();
+    assert_eq!(
+        grammar.map(|grammar| grammar.encoding.as_str()),
+        Some("named")
+    );
+    assert_eq!(
+        grammar.map(|grammar| grammar.scope.as_str()),
+        Some("bundle")
+    );
+
+    let unaudited = engine.function_readiness("DLLWIFI_TEST", "UNAUDITED", None)?;
+    assert_eq!(unaudited.status, Readiness::NotReady);
+    assert_eq!(
+        serde_json::to_value(&unaudited.unaudited_keys)
+            .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?,
+        serde_json::json!([{"kind": "parameter", "name": "ANT"}])
+    );
+
+    let missing = engine.function_readiness("DLLWIFI_TEST", "NO_PROFILE", None)?;
+    assert_eq!(missing.status, Readiness::NotReady);
+    assert!(missing.grammar.is_none());
+    assert!(
+        missing
+            .line
+            .issues
+            .iter()
+            .any(|issue| issue.code == "unsupported_grammar")
+    );
+
+    let mut duplicated = fixture_snapshot();
+    duplicated
+        .parameter_links
+        .push(duplicated.parameter_links[0].clone());
+    let duplicated = Engine::new(duplicated).function_readiness(
+        "DLLWIFI_TEST",
+        "TX_MULTI_VERIFICATION",
+        None,
+    )?;
+    assert_eq!(duplicated.status, Readiness::NotReady);
+    assert_eq!(duplicated.line.issues[0].code, "resolution_error");
+    Ok(())
+}
+
+#[test]
+fn get_device_summarizes_readiness_and_resolving_field_scopes() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions.push(Function {
+        source: "DLL".into(),
+        interface: "WIFI_TEST".into(),
+        name: "RX".into(),
+        convention: Some(2),
+        ..Function::default()
+    });
+    snapshot.parameter_links.extend([
+        Link {
+            name: "ANT".into(),
+            function_source: "DLL".into(),
+            function_name: "RX".into(),
+            device_name: "WIFI_TEST".into(),
+            position: Some(1),
+            required: true,
+        },
+        Link {
+            name: "UNDEFINED".into(),
+            function_source: "DLL".into(),
+            function_name: "RX".into(),
+            device_name: "WIFI_TEST".into(),
+            position: Some(2),
+            required: false,
+        },
+    ]);
+    let engine = Engine::new(snapshot);
+    let device = serde_json::to_value(engine.get_device("DLLWIFI_TEST")?)
+        .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+    assert_eq!(
+        device,
+        serde_json::json!({
+            "script_device": "DLLWIFI_TEST",
+            "source": "DLL",
+            "interface": "WIFI_TEST",
+            "mode_suffixes": ["QUICK", "PROXY"],
+            "function_count": 2,
+            "composable_count": 1,
+            "readiness": {"ready": 1, "bundle_ready": 0, "not_ready": 1},
+            "fields": [
+                {"kind": "parameter", "name": "ANT", "resolutions": ["scoped"]},
+                {"kind": "parameter", "name": "UNDEFINED", "resolutions": ["missing"]},
+                {"kind": "criterion", "name": "POWER", "resolutions": ["global"]}
+            ]
+        })
+    );
+    assert_eq!(
+        engine
+            .get_device("WIFI")
+            .map_err(|error| error.code())
+            .err(),
+        Some("unknown_device")
+    );
+    Ok(())
+}
+
+#[test]
+fn function_rows_filter_page_and_project_deterministically() -> Result<()> {
+    use script_audit_mcp::discovery::FunctionQuery;
+
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions.extend([
+        Function {
+            source: "BUILT-IN".into(),
+            interface: "SSH".into(),
+            name: "CLOSE".into(),
+            convention: Some(1),
+            category: "Communication".into(),
+            execution_phase: "teardown".into(),
+            ..Function::default()
+        },
+        Function {
+            source: "BUILT-IN".into(),
+            interface: "SSH".into(),
+            name: "SEND".into(),
+            convention: Some(1),
+            category: "communication".into(),
+            execution_phase: "test".into(),
+            ..Function::default()
+        },
+    ]);
+    let engine = Engine::new(snapshot);
+    let page = |query: FunctionQuery| engine.list_function_rows(&query);
+    let names = |page: &script_audit_mcp::discovery::FunctionPage| {
+        page.functions
+            .iter()
+            .map(|row| row["name"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let all = page(FunctionQuery::default())?;
+    assert_eq!(
+        names(&all),
+        ["CLOSE", "OPEN", "SEND", "TX_MULTI_VERIFICATION"]
+    );
+    assert_eq!(all.next_cursor, None);
+    let open = &all.functions[1];
+    assert_eq!(open["script_device"], "SSH");
+    assert_eq!(open["readiness"], "ready");
+    assert_eq!(open["category"], "communication");
+    assert_eq!(all.functions[0]["readiness"], "not_ready");
+
+    let communication = page(FunctionQuery {
+        category: Some("COMMUNICATION".into()),
+        execution_phase: Some("test".into()),
+        ..FunctionQuery::default()
+    })?;
+    assert_eq!(names(&communication), ["SEND"]);
+    let composable = page(FunctionQuery {
+        device: Some("SSH".into()),
+        composable_only: Some(true),
+        ..FunctionQuery::default()
+    })?;
+    assert_eq!(names(&composable), ["OPEN"]);
+
+    let mut cursor = None;
+    let mut paged = Vec::new();
+    loop {
+        let next = page(FunctionQuery {
+            limit: Some(3),
+            cursor: cursor.take(),
+            ..FunctionQuery::default()
+        })?;
+        assert!(next.functions.len() <= 3);
+        paged.extend(names(&next));
+        match next.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(paged, names(&all));
+    let exact = page(FunctionQuery {
+        limit: Some(4),
+        ..FunctionQuery::default()
+    })?;
+    assert_eq!(
+        exact.next_cursor, None,
+        "an exactly full page has no next cursor"
+    );
+
+    let projected = page(FunctionQuery {
+        limit: Some(1),
+        fields: Some(vec!["name".into(), "readiness".into()]),
+        ..FunctionQuery::default()
+    })?;
+    assert_eq!(
+        serde_json::Value::Object(projected.functions[0].clone()),
+        serde_json::json!({"name": "CLOSE", "readiness": "not_ready"})
+    );
+
+    for (query, field) in [
+        (
+            FunctionQuery {
+                fields: Some(vec!["bogus".into()]),
+                ..FunctionQuery::default()
+            },
+            "fields",
+        ),
+        (
+            FunctionQuery {
+                limit: Some(0),
+                ..FunctionQuery::default()
+            },
+            "limit",
+        ),
+        (
+            FunctionQuery {
+                limit: Some(501),
+                ..FunctionQuery::default()
+            },
+            "limit",
+        ),
+        (
+            FunctionQuery {
+                cursor: Some("garbage".into()),
+                ..FunctionQuery::default()
+            },
+            "cursor",
+        ),
+    ] {
+        match page(query) {
+            Err(script_audit_mcp::Error::InvalidInput { field: got, .. }) => assert_eq!(got, field),
+            other => panic!("{field}: expected invalid input, got {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn function_fields_match_get_function_for_one_or_every_device_function() -> Result<()> {
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions.push(Function {
+        source: "DLL".into(),
+        interface: "WIFI_TEST".into(),
+        name: "RX".into(),
+        convention: Some(2),
+        ..Function::default()
+    });
+    snapshot.criteria_links.push(Link {
+        name: "POWER".into(),
+        function_source: "DLL".into(),
+        function_name: "RX".into(),
+        device_name: "WIFI_TEST".into(),
+        position: Some(1),
+        required: true,
+    });
+    let engine = Engine::new(snapshot);
+    let every = engine.list_function_fields("DLLWIFI_TEST", None, None)?;
+    assert_eq!(
+        every
+            .functions
+            .iter()
+            .map(|fields| fields.name.as_str())
+            .collect::<Vec<_>>(),
+        ["RX", "TX_MULTI_VERIFICATION"]
+    );
+    for fields in &every.functions {
+        let schema = engine.get_function("DLLWIFI_TEST", &fields.name, None)?;
+        let expected = serde_json::json!({
+            "device_scope": schema.device_scope,
+            "parameters": schema.parameters,
+            "criteria": schema.criteria,
+        });
+        let actual = serde_json::json!({
+            "device_scope": fields.device_scope,
+            "parameters": fields.parameters,
+            "criteria": fields.criteria,
+        });
+        assert_eq!(actual, expected, "{}", fields.name);
+    }
+    let one = engine.list_function_fields("DLLWIFI_TEST", Some("rx"), None)?;
+    assert_eq!(one.functions.len(), 1);
+    assert_eq!(one.functions[0].criteria[0].name, "POWER");
+    assert!(one.functions[0].criteria[0].definition.is_some());
+    assert_eq!(
+        engine
+            .list_function_fields("DLLWIFI_TEST", Some("MISSING"), None)
+            .map_err(|error| error.code())
+            .err(),
+        Some("unknown_function")
+    );
+    Ok(())
+}
+
+#[test]
+fn definition_lookups_label_scopes_and_find_each_linking_function_once() -> Result<()> {
+    use script_audit_mcp::discovery::FieldKind;
+
+    let mut snapshot = fixture_snapshot();
+    snapshot.parameter_definitions.push(Definition {
+        name: "ANT".into(),
+        kind: "int".into(),
+        description: "Global antenna".into(),
+        ..Definition::default()
+    });
+    snapshot.functions.push(Function {
+        source: "DLL".into(),
+        interface: "BT_TEST".into(),
+        name: "TX_MULTI_VERIFICATION".into(),
+        convention: Some(2),
+        ..Function::default()
+    });
+    snapshot.parameter_links.push(Link {
+        name: "ANT".into(),
+        function_source: "DLL".into(),
+        function_name: "TX_MULTI_VERIFICATION".into(),
+        device_name: String::new(),
+        position: Some(3),
+        required: false,
+    });
+    let engine = Engine::new(snapshot);
+    let json = |value: serde_json::Result<serde_json::Value>| {
+        value.map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))
+    };
+
+    let every = json(serde_json::to_value(engine.get_definition(
+        FieldKind::Parameter,
+        "ant",
+        None,
+    )?))?;
+    assert_eq!(every["kind"], "parameter");
+    assert_eq!(
+        every["definitions"].as_array().map(|rows| rows
+            .iter()
+            .map(|row| (row["resolution"].clone(), row["device_name"].clone()))
+            .collect::<Vec<_>>()),
+        Some(vec![
+            (serde_json::json!("global"), serde_json::json!("")),
+            (serde_json::json!("scoped"), serde_json::json!("WIFI_TEST")),
+        ])
+    );
+    let scoped = engine.get_definition(FieldKind::Parameter, "ANT", Some("bt_test"))?;
+    assert_eq!(scoped.definitions.len(), 1, "other scopes are excluded");
+    assert!(
+        engine
+            .get_definition(FieldKind::Criterion, "NOPE", None)?
+            .definitions
+            .is_empty()
+    );
+
+    let users = json(serde_json::to_value(engine.find_functions_using(
+        FieldKind::Parameter,
+        "ANT",
+        None,
+    )?))?;
+    assert_eq!(
+        users["functions"],
+        serde_json::json!([
+            {"script_device": "DLLBT_TEST", "source": "DLL", "interface": "BT_TEST",
+             "name": "TX_MULTI_VERIFICATION", "link_scope": "", "position": 3, "required": false},
+            {"script_device": "DLLWIFI_TEST", "source": "DLL", "interface": "WIFI_TEST",
+             "name": "TX_MULTI_VERIFICATION", "link_scope": "WIFI_TEST", "position": 1, "required": true}
+        ])
+    );
+    let power = engine.find_functions_using(FieldKind::Criterion, "power", None)?;
+    assert_eq!(power.functions.len(), 1);
+    assert!(
+        engine
+            .find_functions_using(FieldKind::Criterion, "NOPE", None)?
+            .functions
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn search_catalog_ranks_name_matches_above_descriptions() -> Result<()> {
+    use script_audit_mcp::discovery::{SearchKind, SearchQuery};
+
+    let mut snapshot = fixture_snapshot();
+    snapshot.functions[0].description = "Open an SSH session to the antenna controller".into();
+    snapshot.functions.push(Function {
+        source: "DLL".into(),
+        interface: "WIFI_TEST".into(),
+        name: "ANT_SWITCH".into(),
+        convention: Some(2),
+        ..Function::default()
+    });
+    let engine = Engine::new(snapshot);
+    let search = |query: &str, kinds: Option<Vec<SearchKind>>, limit: Option<u32>| {
+        engine.search_catalog(&SearchQuery {
+            query: query.into(),
+            kinds,
+            limit,
+        })
+    };
+    let hits = search("ANT", None, None)?;
+    let identities: Vec<_> = hits
+        .hits
+        .iter()
+        .map(|hit| {
+            (
+                serde_json::to_value(hit.kind).unwrap_or_default(),
+                hit.name.as_str(),
+                hit.matched_in.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        identities,
+        [
+            (serde_json::json!("parameter"), "ANT", "name"),
+            (serde_json::json!("function"), "ANT_SWITCH", "name"),
+            (serde_json::json!("function"), "OPEN", "description"),
+        ]
+    );
+    assert_eq!(hits.hits[1].script_device.as_deref(), Some("DLLWIFI_TEST"));
+    assert_eq!(hits.hits[0].device_scope.as_deref(), Some("WIFI_TEST"));
+    assert!(hits.hits[2].snippet.to_lowercase().contains("antenna"));
+
+    let functions = search("ant", Some(vec![SearchKind::Function]), Some(1))?;
+    assert_eq!(functions.hits.len(), 1);
+    assert_eq!(functions.hits[0].name, "ANT_SWITCH");
+    let criteria = search("power", Some(vec![SearchKind::Criterion]), None)?;
+    assert_eq!(criteria.hits.len(), 1);
+    assert_eq!(criteria.hits[0].device_scope.as_deref(), Some(""));
+
+    for (query, limit, field) in [
+        ("  ", None, "query"),
+        ("ant", Some(0), "limit"),
+        ("ant", Some(101), "limit"),
+    ] {
+        match search(query, None, limit) {
+            Err(script_audit_mcp::Error::InvalidInput { field: got, .. }) => assert_eq!(got, field),
+            other => panic!("{field}: expected invalid input, got {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn catalog_info_counts_rows_and_hashes_every_catalog_change() -> Result<()> {
+    use script_audit_mcp::model::{AuditedGrammar, ScriptKeyAudit};
+
+    let info = fixture().catalog_info()?;
+    assert_eq!(info.contract, "legacy");
+    assert_eq!(info.revision_source, "content_hash");
+    let hex = info
+        .revision
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| panic!("revision {}", info.revision));
+    assert_eq!(hex.len(), 64);
+    assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let counts = &info.counts;
+    assert_eq!(
+        (
+            counts.functions,
+            counts.script_devices,
+            counts.parameter_definitions,
+            counts.criteria_definitions,
+            counts.parameter_links,
+            counts.criteria_links,
+            counts.examples,
+            counts.audited_grammars,
+            counts.script_key_audits,
+        ),
+        (2, 2, 2, 2, 2, 2, 1, 0, 0)
+    );
+    assert_eq!(fixture().catalog_info()?.revision, info.revision);
+
+    let mut changed = fixture_snapshot();
+    changed.examples[0].meaning.push('!');
+    assert_ne!(Engine::new(changed).catalog_info()?.revision, info.revision);
+
+    let mut audited = fixture_snapshot();
+    audited.functions[1].audited_grammar = Some(AuditedGrammar {
+        encoding: "named".into(),
+        scope: "line".into(),
+        script_keys: vec![ScriptKeyAudit {
+            criterion: false,
+            name: "ANT".into(),
+            scope: "line".into(),
+        }],
+    });
+    let audited_info = Engine::new(audited.clone()).catalog_info()?;
+    assert_eq!(audited_info.contract, "mcp_v1");
+    assert_eq!(audited_info.counts.audited_grammars, 1);
+    assert_eq!(audited_info.counts.script_key_audits, 1);
+    assert_ne!(audited_info.revision, info.revision);
+    if let Some(grammar) = audited.functions[1].audited_grammar.as_mut() {
+        grammar.script_keys[0].scope = "bundle".into();
+    }
+    assert_ne!(
+        Engine::new(audited).catalog_info()?.revision,
+        audited_info.revision
+    );
+    Ok(())
+}
+
+#[test]
+fn parse_line_splits_fields_and_annotates_definitions() -> Result<()> {
+    use script_audit_mcp::discovery::{FieldResolution, PayloadEncoding};
+
+    let engine = fixture();
+    let named = engine.parse_line(
+        "DLLWIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2&FOO=1&*V:Common#|POWER=5|20000|NEXT|FAIL|",
+        None,
+    )?;
+    assert_eq!(named.device.as_deref(), Some("DLLWIFI_TEST"));
+    assert_eq!(named.function.as_deref(), Some("TX_MULTI_VERIFICATION"));
+    assert_eq!(named.source.as_deref(), Some("DLL"));
+    assert_eq!(named.interface.as_deref(), Some("WIFI_TEST"));
+    assert_eq!(named.convention, Some(2));
+    assert_eq!(named.timeout.as_deref(), Some("20000"));
+    assert_eq!(named.pass_path.as_deref(), Some("NEXT"));
+    assert_eq!(named.fail_path.as_deref(), Some("FAIL"));
+    assert_eq!(named.error_code.as_deref(), Some(""));
+    let parameters = &named.parameters;
+    assert_eq!(parameters.encoding, PayloadEncoding::Named);
+    assert_eq!(parameters.section_references, ["*V:Common#"]);
+    let summary: Vec<_> = parameters
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.as_str(),
+                field.value.as_str(),
+                field.linked,
+                field.resolution,
+                field
+                    .definition
+                    .as_ref()
+                    .map(|definition| definition.kind.as_str()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("ANT", "15,2", true, FieldResolution::Scoped, Some("int")),
+            ("FOO", "1", false, FieldResolution::Missing, None),
+        ]
+    );
+    let criteria = &named.criteria;
+    assert_eq!(criteria.encoding, PayloadEncoding::Named);
+    assert_eq!(criteria.fields.len(), 1);
+    assert_eq!(criteria.fields[0].name, "POWER");
+    assert_eq!(criteria.fields[0].value, "5");
+    assert_eq!(criteria.fields[0].resolution, FieldResolution::Global);
+
+    let raw = engine.parse_line("SSH|OPEN|DUT@echo|NULL|1", None)?;
+    assert_eq!(raw.parameters.encoding, PayloadEncoding::Raw);
+    assert_eq!(raw.parameters.fields.len(), 1);
+    assert_eq!(raw.parameters.fields[0].name, "SESSION_PAYLOAD");
+    assert_eq!(raw.parameters.fields[0].value, "DUT@echo");
+    assert_eq!(raw.parameters.fields[0].resolution, FieldResolution::Scoped);
+    assert_eq!(raw.criteria.encoding, PayloadEncoding::Null);
+    assert!(raw.criteria.fields.is_empty());
+    assert_eq!(raw.pass_path, None);
+
+    let unknown = engine.parse_line("SSH|NOPE|A=1|NULL|1", None)?;
+    assert_eq!(unknown.function.as_deref(), Some("NOPE"));
+    assert_eq!(unknown.interface, None);
+    assert_eq!(unknown.parameters.encoding, PayloadEncoding::Unknown);
+    assert_eq!(unknown.parameters.raw, "A=1");
+    assert!(unknown.parameters.fields.is_empty());
+    assert!(
+        unknown
+            .diagnostics
+            .iter()
+            .any(|issue| issue.code == "unknown_function"),
+        "{:?}",
+        unknown.diagnostics
+    );
+    Ok(())
+}
+
+#[test]
+fn list_examples_filters_by_device_function_and_text_and_pages() -> Result<()> {
+    use script_audit_mcp::discovery::ExampleQuery;
+
+    let mut snapshot = fixture_snapshot();
+    snapshot.examples.push(Example {
+        function_source: "BUILT-IN".into(),
+        device_name: "SSH".into(),
+        function_name: "OPEN".into(),
+        script: "SSH|OPEN|dut@echo|NULL|500".into(),
+        meaning: "Open a DUT session".into(),
+    });
+    let engine = Engine::new(snapshot);
+    let list = |device: Option<&str>, function: Option<&str>, query: Option<&str>| {
+        engine.list_examples(&ExampleQuery {
+            device: device.map(Into::into),
+            function: function.map(Into::into),
+            query: query.map(Into::into),
+            ..ExampleQuery::default()
+        })
+    };
+    let scripts = |page: script_audit_mcp::discovery::ExamplePage| {
+        page.examples
+            .into_iter()
+            .map(|example| example.function_name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        scripts(list(None, None, None)?),
+        ["OPEN", "TX_MULTI_VERIFICATION"]
+    );
+    assert_eq!(scripts(list(Some("SSH"), None, None)?), ["OPEN"]);
+    assert_eq!(
+        scripts(list(
+            Some("DLLWIFI_TEST"),
+            Some("tx_multi_verification"),
+            None
+        )?),
+        ["TX_MULTI_VERIFICATION"]
+    );
+    assert_eq!(scripts(list(None, Some("open"), None)?), ["OPEN"]);
+    assert_eq!(
+        scripts(list(None, None, Some("ANTENNAS"))?),
+        ["TX_MULTI_VERIFICATION"]
+    );
+    assert_eq!(scripts(list(None, None, Some("dut@echo"))?), ["OPEN"]);
+    assert!(scripts(list(Some("SSH"), None, Some("antennas"))?).is_empty());
+    assert_eq!(
+        list(Some("WIFI"), None, None)
+            .map_err(|error| error.code())
+            .err(),
+        Some("unknown_device")
+    );
+    assert_eq!(
+        list(Some("SSH"), Some("MISSING"), None)
+            .map_err(|error| error.code())
+            .err(),
+        Some("unknown_function")
+    );
+
+    let first = engine.list_examples(&ExampleQuery {
+        limit: Some(1),
+        ..ExampleQuery::default()
+    })?;
+    assert_eq!(first.examples.len(), 1);
+    let second = engine.list_examples(&ExampleQuery {
+        limit: Some(1),
+        cursor: first.next_cursor.clone(),
+        ..ExampleQuery::default()
+    })?;
+    assert_eq!(second.examples[0].function_name, "TX_MULTI_VERIFICATION");
+    assert_eq!(second.next_cursor, None);
+    Ok(())
+}
+
 #[test]
 fn list_functions_preserves_script_device_resolution_for_support() -> Result<()> {
     let mut snapshot = fixture_snapshot();
@@ -1346,6 +2236,140 @@ impl script_audit_mcp::Catalog for MemoryCatalog {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn mcp_tools_declare_titles_and_object_output_schemas_their_results_satisfy() -> Result<()> {
+    use rmcp::handler::server::wrapper::Parameters;
+    use script_audit_mcp::mcp::McpServer;
+    use serde_json::json;
+
+    fn args<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<Parameters<T>> {
+        serde_json::from_value(value)
+            .map(Parameters)
+            .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))
+    }
+    let failed = |error: rmcp::ErrorData| script_audit_mcp::Error::Knowledge(error.to_string());
+
+    let tools = McpServer::tool_router().list_all();
+    assert_eq!(tools.len(), 18);
+    let mut schemas = BTreeMap::new();
+    for tool in &tools {
+        assert!(
+            tool.title.as_deref().is_some_and(|title| !title.is_empty()),
+            "{} lacks a title",
+            tool.name
+        );
+        let schema = serde_json::Value::Object(
+            tool.output_schema
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| panic!("{} lacks an outputSchema", tool.name)),
+        );
+        assert_eq!(schema["type"], "object", "{}", tool.name);
+        schemas.insert(tool.name.to_string(), schema);
+    }
+
+    let server = McpServer::new(std::sync::Arc::new(MemoryCatalog));
+    let wifi = || json!({"device": "DLLWIFI_TEST", "name": "TX_MULTI_VERIFICATION"});
+    let results = vec![
+        ("catalog_info", server.catalog_info().await),
+        ("list_devices", server.list_devices().await),
+        (
+            "get_device",
+            server
+                .get_device(args(json!({"device": "WIFI_TEST"}))?)
+                .await,
+        ),
+        (
+            "get_device",
+            server.get_device(args(json!({"device": "WIFI"}))?).await,
+        ),
+        (
+            "get_function_readiness",
+            server.get_function_readiness(args(wifi())?).await,
+        ),
+        ("get_function", server.get_function(args(wifi())?).await),
+        (
+            "list_function_fields",
+            server
+                .list_function_fields(args(json!({"device": "SSH"}))?)
+                .await,
+        ),
+        (
+            "get_definition",
+            server
+                .get_definition(args(json!({"kind": "parameter", "name": "ANT"}))?)
+                .await,
+        ),
+        (
+            "find_functions_using",
+            server
+                .find_functions_using(args(json!({"kind": "criterion", "name": "POWER"}))?)
+                .await,
+        ),
+        (
+            "search_catalog",
+            server.search_catalog(args(json!({"query": "open"}))?).await,
+        ),
+        (
+            "list_examples",
+            server
+                .list_examples(args(json!({"device": "WIFI_TEST"}))?)
+                .await,
+        ),
+        (
+            "list_functions",
+            server.list_functions(args(json!({}))?).await,
+        ),
+        (
+            "list_functions",
+            server.list_functions(args(json!({"device": "SSH"}))?).await,
+        ),
+        (
+            "suggest_criteria",
+            server
+                .suggest_criteria(args(
+                    json!({"device": "DLLWIFI_TEST", "function": "TX_MULTI_VERIFICATION"}),
+                )?)
+                .await,
+        ),
+        (
+            "compose_line",
+            server.compose_line(Parameters(wifi_request())).await,
+        ),
+        (
+            "validate_line",
+            server
+                .validate_line(args(json!({"line": "SSH|OPEN|DUT@echo|NULL|1"}))?)
+                .await,
+        ),
+        (
+            "parse_line",
+            server
+                .parse_line(args(json!({"line": "SSH|OPEN|DUT@echo|NULL|1"}))?)
+                .await,
+        ),
+    ];
+    let mut saw_error = false;
+    for (name, result) in results {
+        let result = result.map_err(failed)?;
+        saw_error |= result.is_error == Some(true);
+        let content = result
+            .structured_content
+            .unwrap_or_else(|| panic!("{name} returned no structuredContent"));
+        assert!(content.is_object(), "{name}: {content}");
+        let validator = jsonschema::validator_for(&schemas[name])
+            .map_err(|error| script_audit_mcp::Error::Knowledge(format!("{name}: {error}")))?;
+        let errors: Vec<_> = validator
+            .iter_errors(&content)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{name}: {errors:?}\n{content}");
+    }
+    assert!(saw_error, "the error envelope must be covered");
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn mcp_catalog_tool_returns_structured_data() -> Result<()> {
     use rmcp::handler::server::wrapper::Parameters;
     use script_audit_mcp::mcp::{ListFunctionsRequest, McpServer};
@@ -1353,6 +2377,7 @@ async fn mcp_catalog_tool_returns_structured_data() -> Result<()> {
     let result = server
         .list_functions(Parameters(ListFunctionsRequest {
             device: Some("SSH".into()),
+            ..ListFunctionsRequest::default()
         }))
         .await
         .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
@@ -1452,6 +2477,444 @@ fn compose_rejects_criteria_keys_that_cannot_round_trip() {
     assert!(fixture().compose_line(request).is_err());
 }
 
+/// A JSON-RPC client over an in-memory duplex to an initialized `McpServer` on the fixture.
+#[cfg(feature = "mcp")]
+struct McpSession {
+    input: tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    output: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    task: tokio::task::JoinHandle<Result<()>>,
+    next_id: u64,
+    initialized: serde_json::Value,
+}
+
+#[cfg(feature = "mcp")]
+impl McpSession {
+    async fn start() -> Result<Self> {
+        use rmcp::ServiceExt;
+        let knowledge = |error: String| script_audit_mcp::Error::Knowledge(error);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let server = script_audit_mcp::mcp::McpServer::new(std::sync::Arc::new(MemoryCatalog));
+        let task = tokio::spawn(async move {
+            let service = server
+                .serve(tokio::io::split(server_stream))
+                .await
+                .map_err(|error| knowledge(error.to_string()))?;
+            service
+                .waiting()
+                .await
+                .map_err(|error| knowledge(error.to_string()))?;
+            Ok(())
+        });
+        let (input, output) = tokio::io::split(client_stream);
+        let mut session = Self {
+            input: tokio::io::BufReader::new(input),
+            output,
+            task,
+            next_id: 0,
+            initialized: serde_json::Value::Null,
+        };
+        session.initialized = session
+            .request(
+                "initialize",
+                serde_json::json!({"protocolVersion":"2025-06-18","capabilities":{},
+                    "clientInfo":{"name":"fixture-client","version":"1"}}),
+            )
+            .await?;
+        session
+            .send(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await?;
+        Ok(session)
+    }
+
+    async fn send(&mut self, value: serde_json::Value) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut payload = serde_json::to_vec(&value)
+            .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+        payload.push(b'\n');
+        self.output.write_all(&payload).await?;
+        self.output.flush().await?;
+        Ok(())
+    }
+
+    /// Sends a request and returns the whole JSON-RPC response (`result` or `error`).
+    async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        use tokio::io::AsyncBufReadExt;
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .await?;
+        let mut payload = String::new();
+        if self.input.read_line(&mut payload).await? == 0 {
+            return Err(script_audit_mcp::Error::Knowledge(
+                "MCP peer closed before a response".into(),
+            ));
+        }
+        let response: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+        assert_eq!(response["id"], id, "{response}");
+        Ok(response)
+    }
+
+    async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .request(
+                "tools/call",
+                serde_json::json!({"name":name,"arguments":arguments}),
+            )
+            .await?;
+        assert_ne!(response["result"]["isError"], true, "{name}: {response}");
+        Ok(response["result"]["structuredContent"].clone())
+    }
+
+    async fn finish(self) -> Result<()> {
+        drop(self.output);
+        drop(self.input);
+        self.task
+            .await
+            .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?
+    }
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_catalog_resources_mirror_their_tools() -> Result<()> {
+    use serde_json::json;
+
+    let mut session = McpSession::start().await?;
+    assert!(
+        session.initialized["result"]["capabilities"]["resources"].is_object(),
+        "{}",
+        session.initialized
+    );
+
+    let templates = session
+        .request("resources/templates/list", json!({}))
+        .await?;
+    let templates = templates["result"]["resourceTemplates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for uri_template in [
+        "catalog://devices/{device}",
+        "catalog://devices/{device}/functions",
+        "catalog://functions/{device}/{name}",
+        "catalog://definitions/{kind}/{name}",
+        "catalog://examples/{device}/{name}",
+    ] {
+        assert!(
+            templates
+                .iter()
+                .any(|template| template["uriTemplate"] == uri_template
+                    && template["mimeType"] == "application/json"
+                    && template["name"].is_string()),
+            "missing {uri_template}: {templates:?}"
+        );
+    }
+    let listed = session.request("resources/list", json!({})).await?;
+    let resources = listed["result"]["resources"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for uri in ["catalog://devices", "catalog://info"] {
+        assert!(
+            resources.iter().any(
+                |resource| resource["uri"] == uri && resource["mimeType"] == "application/json"
+            ),
+            "missing {uri}: {resources:?}"
+        );
+    }
+
+    let cases = [
+        ("catalog://devices", "list_devices", json!({})),
+        ("catalog://info", "catalog_info", json!({})),
+        (
+            "catalog://devices/SSH",
+            "get_device",
+            json!({"device":"SSH"}),
+        ),
+        // Path segments are percent-decoded: %53 is `S`.
+        (
+            "catalog://devices/%53SH",
+            "get_device",
+            json!({"device":"SSH"}),
+        ),
+        (
+            "catalog://devices/DLLWIFI_TEST/functions",
+            "list_functions",
+            json!({"device":"DLLWIFI_TEST"}),
+        ),
+        (
+            "catalog://functions/SSH/OPEN",
+            "get_function",
+            json!({"device":"SSH","name":"OPEN"}),
+        ),
+        (
+            "catalog://definitions/parameter/ANT",
+            "get_definition",
+            json!({"kind":"parameter","name":"ANT"}),
+        ),
+        (
+            "catalog://definitions/criterion/POWER",
+            "get_definition",
+            json!({"kind":"criterion","name":"POWER"}),
+        ),
+        (
+            "catalog://examples/SSH/OPEN",
+            "list_examples",
+            json!({"device":"SSH","function":"OPEN"}),
+        ),
+    ];
+    for (uri, tool, arguments) in cases {
+        let read = session
+            .request("resources/read", json!({"uri":uri}))
+            .await?;
+        let contents = read["result"]["contents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(contents.len(), 1, "{uri}: {read}");
+        assert_eq!(contents[0]["uri"], uri, "{uri}: {read}");
+        assert_eq!(contents[0]["mimeType"], "application/json", "{uri}: {read}");
+        let body: serde_json::Value =
+            serde_json::from_str(contents[0]["text"].as_str().unwrap_or_default())
+                .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?;
+        assert_eq!(body, session.call_tool(tool, arguments).await?, "{uri}");
+    }
+
+    for uri in [
+        "catalog://nothing",
+        "catalog://devices/SSH/extra/segment",
+        "catalog://functions/SSH/NO_SUCH_FUNCTION",
+        "catalog://devices/NO_SUCH_DEVICE",
+        "catalog://definitions/parameter/NO_SUCH_FIELD",
+        "catalog://definitions/widget/POWER",
+        "file:///etc/passwd",
+    ] {
+        let read = session
+            .request("resources/read", json!({"uri":uri}))
+            .await?;
+        assert_eq!(read["error"]["code"], -32002, "{uri}: {read}");
+        assert!(read["result"].is_null(), "{uri}: {read}");
+    }
+    session.finish().await
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_documentation_resources_serve_versioned_markdown() -> Result<()> {
+    use serde_json::json;
+
+    let mut session = McpSession::start().await?;
+    let instructions = session.initialized["result"]["instructions"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let listed = session.request("resources/list", json!({})).await?;
+    let resources = listed["result"]["resources"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for (uri, terms) in [
+        (
+            "docs://script-grammar",
+            &[
+                "convention 1",
+                "convention 2",
+                "*V:Section#",
+                "SINGLE",
+                "MULTIPLE",
+                "NULL",
+            ][..],
+        ),
+        (
+            "docs://script-devices",
+            &[
+                "Script device",
+                "Device scope",
+                "DLL",
+                "#QUICK",
+                "#PROXY",
+                "Interface",
+            ][..],
+        ),
+        (
+            "docs://ini-bundle-dialects",
+            &["hh5k", "checker_legacy", "MAIN_FLOW.ini", "ERRCODE:"][..],
+        ),
+    ] {
+        assert!(
+            resources
+                .iter()
+                .any(|resource| resource["uri"] == uri && resource["mimeType"] == "text/markdown"),
+            "missing {uri}: {resources:?}"
+        );
+        assert!(instructions.contains(uri), "instructions lack {uri}");
+        let read = session
+            .request("resources/read", json!({"uri":uri}))
+            .await?;
+        let contents = &read["result"]["contents"][0];
+        assert_eq!(contents["uri"], uri, "{read}");
+        assert_eq!(contents["mimeType"], "text/markdown", "{read}");
+        let text = contents["text"].as_str().unwrap_or_default();
+        assert!(text.starts_with("# "), "{uri} lacks a heading");
+        for term in terms {
+            assert!(text.contains(term), "{uri} lacks {term}");
+        }
+    }
+    let missing = session
+        .request("resources/read", json!({"uri":"docs://nothing"}))
+        .await?;
+    assert_eq!(missing["error"]["code"], -32002, "{missing}");
+    session.finish().await
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_workflow_prompts_render_with_existing_tools_and_enforce_arguments() -> Result<()> {
+    use serde_json::json;
+
+    let mut session = McpSession::start().await?;
+    assert!(
+        session.initialized["result"]["capabilities"]["prompts"].is_object(),
+        "{}",
+        session.initialized
+    );
+    let tools = session.request("tools/list", json!({})).await?;
+    let tools = tools["result"]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut known: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for tool in &tools {
+        known.insert(tool["name"].as_str().unwrap_or_default().to_string());
+        if let Some(properties) = tool["inputSchema"]["properties"].as_object() {
+            known.extend(properties.keys().cloned());
+        }
+    }
+
+    let listed = session.request("prompts/list", json!({})).await?;
+    let prompts = listed["result"]["prompts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<_> = prompts
+        .iter()
+        .filter_map(|prompt| prompt["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "compose-test-step",
+            "explain-script-line",
+            "review-ini-bundle",
+            "plan-to-bundle",
+            "audit-function-readiness",
+            "troubleshoot-failing-line"
+        ]
+    );
+    for prompt in &prompts {
+        let name = prompt["name"].as_str().unwrap_or_default();
+        assert!(
+            prompt["title"].is_string() && prompt["description"].is_string(),
+            "{prompt}"
+        );
+        let arguments = prompt["arguments"].as_array().cloned().unwrap_or_default();
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument["required"] == true),
+            "{name} has no required argument"
+        );
+        let mut supplied = serde_json::Map::new();
+        for argument in &arguments {
+            assert!(argument["description"].is_string(), "{name}: {argument}");
+            let value = match argument["name"].as_str().unwrap_or_default() {
+                "dialect" => "hh5k",
+                "flow_variant" => "sampling",
+                "line" => "SSH|OPEN|ls|OK|1000",
+                "device" => "SSH",
+                other => other,
+            };
+            if argument["required"] == true {
+                supplied.insert(
+                    argument["name"].as_str().unwrap_or_default().into(),
+                    value.into(),
+                );
+            }
+        }
+
+        let rendered = session
+            .request("prompts/get", json!({"name":name,"arguments":supplied}))
+            .await?;
+        let messages = rendered["result"]["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!messages.is_empty(), "{name}: {rendered}");
+        let text: String = messages
+            .iter()
+            .filter_map(|message| message["content"]["text"].as_str())
+            .collect();
+        for value in supplied.values() {
+            assert!(
+                text.contains(value.as_str().unwrap_or_default()),
+                "{name} drops {value}"
+            );
+        }
+        let mut referenced_tool = false;
+        for token in text.split('`').skip(1).step_by(2) {
+            let identifier = !token.is_empty()
+                && token.contains('_')
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+            if identifier {
+                assert!(known.contains(token), "{name} names unknown `{token}`");
+                referenced_tool |= tools.iter().any(|tool| tool["name"] == token);
+            }
+        }
+        assert!(referenced_tool, "{name} names no tool");
+
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument["required"] != true {
+                continue;
+            }
+            let mut missing = supplied.clone();
+            missing.remove(argument["name"].as_str().unwrap_or_default());
+            let rejected = session
+                .request("prompts/get", json!({"name":name,"arguments":missing}))
+                .await?;
+            assert_eq!(
+                rejected["error"]["code"], -32602,
+                "{name} #{index}: {rejected}"
+            );
+        }
+        let mut unknown = supplied.clone();
+        unknown.insert("not_an_argument".into(), "x".into());
+        let rejected = session
+            .request("prompts/get", json!({"name":name,"arguments":unknown}))
+            .await?;
+        assert_eq!(rejected["error"]["code"], -32602, "{name}: {rejected}");
+    }
+    for arguments in [
+        json!({"name":"review-ini-bundle","arguments":{"selected_flow":"[TEST FLOW:Normal]","dialect":"guessed"}}),
+        json!({"name":"plan-to-bundle","arguments":{"selected_flow":"[TEST FLOW:Normal]","flow_variant":"automatic"}}),
+        json!({"name":"no-such-prompt","arguments":{}}),
+    ] {
+        let rejected = session.request("prompts/get", arguments.clone()).await?;
+        assert_eq!(rejected["error"]["code"], -32602, "{arguments}: {rejected}");
+    }
+    session.finish().await
+}
+
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn mcp_protocol_advertises_and_dispatches_tools() -> Result<()> {
@@ -1497,13 +2960,17 @@ async fn mcp_protocol_advertises_and_dispatches_tools() -> Result<()> {
         assert_eq!(initialized["id"], 1);
         assert_eq!(initialized["result"]["serverInfo"]["name"], "Script Audit");
         assert!(initialized["result"]["capabilities"]["tools"].is_object());
+        let instructions = initialized["result"]["instructions"].as_str().unwrap_or_default();
+        for term in ["Script device", "Device scope", "DLL", "list_devices", "get_function", "validate_line"] {
+            assert!(instructions.contains(term), "instructions lack {term}: {instructions}");
+        }
         send(&mut output, json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
         send(&mut output, json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})).await?;
         let listed = receive(&mut input).await?;
         let tools = listed["result"]["tools"].as_array()
             .ok_or_else(|| script_audit_mcp::Error::Knowledge("missing tool discovery result".into()))?;
-        assert_eq!(tools.len(), 8);
-        for name in ["list_functions", "get_function", "suggest_criteria", "compose_line", "validate_line", "validate_ini_bundle", "compare_plan_to_bundle", "compose_ini_bundle"] {
+        assert_eq!(tools.len(), 18);
+        for name in ["catalog_info", "list_devices", "get_device", "list_function_fields", "get_definition", "find_functions_using", "search_catalog", "list_examples", "parse_line", "list_functions", "get_function", "get_function_readiness", "suggest_criteria", "compose_line", "validate_line", "validate_ini_bundle", "compare_plan_to_bundle", "compose_ini_bundle"] {
             assert!(tools.iter().any(|tool| tool["name"] == name && tool["annotations"]["readOnlyHint"] == true));
         }
         assert!(tools.iter().any(|tool| tool["name"] == "compose_ini_bundle"

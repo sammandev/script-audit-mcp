@@ -85,8 +85,17 @@ agent does not access Ubuntu or the production/deployment database.
 
 | Tool | Arguments |
 | --- | --- |
-| `list_functions` | Optional `device`; returns functions and composition-support metadata |
+| `list_devices` | None; returns every reachable Script device with source, Interface, DLL mode suffixes, and Function/composable counts |
+| `get_device` | `device`; returns the device row, Function readiness counts, and linked field names with resolution |
+| `catalog_info` | None; returns the catalog contract, a sha256 content revision (ADR 0008), server version, and row counts |
+| `list_functions` | Optional AND filters `device`, `category`, `execution_phase`, `composable_only`; `limit`/`cursor` paging and `fields` selection; rows carry `script_device`, readiness, and composition support |
 | `get_function` | `device`, `name`, optional `device_scope`; returns metadata, linked definitions, patterns, examples, diagnostics |
+| `list_function_fields` | `device`, optional `function`, `device_scope`; resolved parameters and criteria for one or every Function on a device |
+| `get_definition` / `find_functions_using` | `kind` (`parameter` or `criterion`), `name`, optional `device_scope`; definitions by name, or the Functions that link a field |
+| `get_function_readiness` | `device`, `name`, optional `device_scope`; `ready`, `bundle_ready`, or `not_ready` with unaudited keys |
+| `search_catalog` | `query`, optional `kinds`, `limit` (1-100, default 20); ranked Function and definition matches |
+| `list_examples` | Optional `device`, `function`, `query`, `limit`, `cursor`; paged stored Examples |
+| `parse_line` | `line`, optional `device_scope`; splits a line into named fields mapped to definitions, without validating |
 | `suggest_criteria` | `device`, `function`, optional `device_scope`; returns known criteria and examples |
 | `compose_line` | `device`, `function`, `params`, `criteria`, `timeout`, optional `device_scope`, `pass_path`, `fail_path`, `error_code`, `param_sections`, `criteria_sections` |
 | `validate_line` | `line`, optional `device_scope`; returns `valid`, `invalid`, or `incomplete`, original segments, and diagnostics |
@@ -94,7 +103,26 @@ agent does not access Ubuntu or the production/deployment database.
 | `compare_plan_to_bundle` | `bundle` (the validation arguments), `plan`, explicit `flow_variant` (`normal` or `sampling`); returns sourced coverage, conflicts, blockers, and the shared validation report |
 | `compose_ini_bundle` | `comparison` (plan-comparison arguments), `flow_anchor`, optional `review`, `draft_approval`, `template_pack`, `procedure_templates`, `station_settings`, `report_metadata`; returns a read-only INI draft preview |
 
-`device` is the script dispatch token, such as `SSH` or `DLLWIFI_TEST`. DLL mode suffixes `#QUICK` and `#PROXY` are preserved. `device_scope` selects knowledge separately; it defaults to the resolved interface. Matching scope overrides Global links by name. Definitions resolve at the link's own scope, then Global. Unrelated scopes are excluded.
+Every tool declares a `title`, `read_only_hint`, and an `outputSchema` that its `structuredContent` satisfies. `initialize` returns server `instructions` describing the discovery workflow.
+
+### Resources
+
+| URI | Contents |
+| --- | --- |
+| `catalog://devices`, `catalog://info` | Same JSON as `list_devices` and `catalog_info` |
+| `catalog://devices/{device}`, `catalog://devices/{device}/functions` | Same JSON as `get_device` and `list_functions(device)` |
+| `catalog://functions/{device}/{name}` | Same JSON as `get_function` |
+| `catalog://definitions/{kind}/{name}` | Same JSON as `get_definition`; empty results are resource-not-found |
+| `catalog://examples/{device}/{name}` | Same JSON as `list_examples(device, function)` |
+| `docs://script-grammar`, `docs://script-devices`, `docs://ini-bundle-dialects` | Markdown reference from `resources/docs/` |
+
+Catalog resources are `application/json`; segments are percent-decoded. Unknown URIs, devices, or Functions return JSON-RPC `-32002` (resource not found).
+
+### Prompts
+
+`compose-test-step`, `explain-script-line`, `review-ini-bundle`, `plan-to-bundle`, `audit-function-readiness`, and `troubleshoot-failing-line` render one user message naming the tools to call in order. Required arguments, unknown arguments, and enumerated choices (`dialect`: `hh5k`/`checker_legacy`; `flow_variant`: `normal`/`sampling`) are enforced with `-32602`.
+
+`device` is the script dispatch token, such as `SSH` or `DLLWIFI_TEST`. Interface names such as `WIFI_TEST` are accepted as aliases by discovery tools when unambiguous (ADR 0009); `compose_line` requires the exact Script device. DLL mode suffixes `#QUICK` and `#PROXY` are preserved. `device_scope` selects knowledge separately; it defaults to the resolved interface. Matching scope overrides Global links by name. Definitions resolve at the link's own scope, then Global. Unrelated scopes are excluded.
 
 `params` uses canonical dictionary names. `SINGLE` takes a string; `MULTIPLE` takes an array of strings. Defaults are not filled automatically. Requiredness comes from the link. Timeout is an explicit positive integer in milliseconds.
 
@@ -1025,7 +1053,7 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-The PostgreSQL fixture creates and cleans up a uniquely named schema. It verifies that actual catalog reads use read-only repeatable-read transactions and correctly decode BIGINT fields and NULLs. A missing test URL is an error. Database-backed fixture execution and stdio startup have not been run locally. Handshake, discovery, and dispatch of all eight tools are tested over an in-memory transport.
+The PostgreSQL fixture creates and cleans up a uniquely named schema. It verifies that actual catalog reads use read-only repeatable-read transactions and correctly decode BIGINT fields and NULLs. A missing test URL is an error. Database-backed fixture execution and stdio startup have not been run locally. Handshake, discovery, and dispatch of all eighteen tools, plus resources and prompts, are tested over an in-memory transport.
 
 Database-free checks can also run on Windows with database features disabled:
 

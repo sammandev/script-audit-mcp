@@ -1,4 +1,6 @@
 pub mod bundle;
+pub mod devices;
+pub mod discovery;
 mod grammar;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -19,8 +21,17 @@ pub(crate) use script_checker::parser::common::is_comment as is_commented_line;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("unknown function: {0}")]
-    UnknownFunction(String),
+    #[error("unknown device: {device}")]
+    UnknownDevice {
+        device: String,
+        candidates: Vec<String>,
+    },
+    /// `candidates` lists close Script devices when the device itself is unknown.
+    #[error("unknown function: {name}")]
+    UnknownFunction {
+        name: String,
+        candidates: Vec<String>,
+    },
     #[error("invalid {field}: {message}")]
     InvalidInput { field: String, message: String },
     #[error("ambiguous function: {0}")]
@@ -44,7 +55,8 @@ pub enum Error {
 impl Error {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::UnknownFunction(_) => "unknown_function",
+            Self::UnknownDevice { .. } => "unknown_device",
+            Self::UnknownFunction { .. } => "unknown_function",
             Self::InvalidInput { .. } => "invalid_input",
             Self::AmbiguousFunction(_) => "ambiguous_function",
             Self::UnsupportedGrammar(_) => "unsupported_grammar",
@@ -56,6 +68,27 @@ impl Error {
             #[cfg(feature = "legacy-sqlite")]
             Self::LegacyDatabase(_) => "database_error",
         }
+    }
+
+    /// Script devices suggested by `unknown_device` and `unknown_function` errors.
+    pub fn candidates(&self) -> &[String] {
+        match self {
+            Self::UnknownDevice { candidates, .. } | Self::UnknownFunction { candidates, .. } => {
+                candidates
+            }
+            _ => &[],
+        }
+    }
+
+    /// Fills empty suggestions; errors that already carry suggestions keep them.
+    pub(crate) fn with_candidates(mut self, suggested: Vec<String>) -> Self {
+        if let Self::UnknownDevice { candidates, .. } | Self::UnknownFunction { candidates, .. } =
+            &mut self
+            && candidates.is_empty()
+        {
+            *candidates = suggested;
+        }
+        self
     }
 }
 
@@ -82,6 +115,13 @@ pub trait Catalog: Send + Sync {
     /// Like `function_snapshot`, but may omit Examples.
     fn function_snapshot_without_examples(&self, device: &str, name: &str) -> Result<Snapshot> {
         self.function_snapshot(device, name)
+    }
+
+    /// Distinct `(source, interface)` pairs, read only after a scoped lookup misses.
+    fn interfaces(&self) -> Result<Vec<(String, String)>> {
+        Ok(devices::interfaces(
+            &self.snapshot_without_examples()?.functions,
+        ))
     }
 }
 
@@ -192,7 +232,7 @@ impl Engine {
                         ("unresolved_schema", Severity::Incomplete)
                     }
                     Error::AmbiguousFunction(_) => ("ambiguous_function", Severity::Error),
-                    Error::UnknownFunction(_) => ("unknown_function", Severity::Error),
+                    Error::UnknownFunction { .. } => ("unknown_function", Severity::Error),
                     _ => ("invalid_input", Severity::Error),
                 };
                 let field = match &error {
@@ -399,13 +439,30 @@ impl Engine {
                 && function.interface.eq_ignore_ascii_case(interface)
                 && function.name.eq_ignore_ascii_case(name)
         });
-        let function = matches
-            .next()
-            .ok_or_else(|| Error::UnknownFunction(format!("{device}/{name}")))?;
+        let function = matches.next().ok_or_else(|| {
+            let interfaces = self.interfaces();
+            Error::UnknownFunction {
+                name: format!("{device}/{name}"),
+                candidates: if devices::is_known(device, &interfaces) {
+                    Vec::new()
+                } else {
+                    devices::candidates(device, &interfaces)
+                },
+            }
+        })?;
         if matches.next().is_some() {
             return Err(Error::AmbiguousFunction(format!("{device}/{name}")));
         }
         Ok(function)
+    }
+
+    /// Resolves a Script device, accepting an unambiguous Interface name as an alias (ADR-0009).
+    pub fn resolve_device(&self, device: &str) -> Result<devices::DeviceMatch> {
+        devices::resolve(device, &self.interfaces())
+    }
+
+    fn interfaces(&self) -> Vec<(String, String)> {
+        devices::interfaces(&self.snapshot.functions)
     }
 
     pub fn list_functions(&self, device: Option<&str>) -> Result<Vec<Function>> {
@@ -452,6 +509,11 @@ impl Engine {
                 function
             })
             .collect();
+        if let Some(device) = device
+            && functions.is_empty()
+        {
+            return Err(devices::unknown_device(device, &self.interfaces()));
+        }
         functions.sort_by(|left, right| {
             (&left.source, &left.interface, &left.name).cmp(&(
                 &right.source,

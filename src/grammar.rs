@@ -135,6 +135,10 @@ impl BundleGrammar {
         self.encoding
     }
 
+    pub(crate) fn support_issues(&self) -> &[Diagnostic] {
+        &self.support_issues
+    }
+
     pub(crate) fn payload_support_issues<'a>(
         &'a self,
         schema: &'a FunctionSchema,
