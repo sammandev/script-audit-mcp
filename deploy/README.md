@@ -63,7 +63,11 @@ cargo build --locked --release --no-default-features --features database,mcp,htt
 
 The Linux binary is `target/release/script-audit-mcp`; a Windows `.exe` cannot
 be used. Build as an ordinary user. If package or crate downloads are blocked,
-use the approved company mirror/proxy; keep TLS verification enabled. Never
+use the approved company mirror/proxy; keep TLS verification enabled. The host
+otherwise builds only from its local Cargo cache, so any `Cargo.lock` change
+(including new dev-dependencies, whose index entries are still resolved) fails
+with `unable to update registry crates-io` until a mirror/proxy is arranged.
+Never
 enable `legacy-sqlite`. This build uses database client libraries, not an engine.
 
 The operator must verify the existing catalog/schema and a SELECT-only login

@@ -2234,6 +2234,195 @@ impl script_audit_mcp::Catalog for MemoryCatalog {
     }
 }
 
+/// Minimal JSON Schema (2020-12) validator for the keywords schemars emits.
+/// Unsupported assertion keywords are reported as errors so the check never passes vacuously.
+/// Kept in-tree so the locked dependency graph stays buildable on the offline deploy host.
+#[cfg(feature = "mcp")]
+fn schema_errors(
+    root: &serde_json::Value,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    let schema = match schema {
+        Value::Bool(true) => return,
+        Value::Bool(false) => return errors.push(format!("{path}: false schema")),
+        Value::Object(schema) => schema,
+        other => return errors.push(format!("{path}: invalid schema {other}")),
+    };
+    let matches = |branch: &Value| {
+        let mut nested = Vec::new();
+        schema_errors(root, branch, value, path, &mut nested);
+        nested.is_empty()
+    };
+    let number = |key: &str| schema.get(key).and_then(Value::as_f64);
+    for (keyword, rule) in schema {
+        match keyword.as_str() {
+            "$schema" | "$id" | "$comment" | "title" | "description" | "default" | "examples"
+            | "format" | "$defs" | "definitions" | "deprecated" | "readOnly" | "writeOnly" => {}
+            "$ref" => {
+                let target = rule
+                    .as_str()
+                    .and_then(|reference| reference.strip_prefix('#'))
+                    .and_then(|pointer| root.pointer(pointer));
+                match target {
+                    Some(target) => schema_errors(root, target, value, path, errors),
+                    None => errors.push(format!("{path}: unresolved $ref {rule}")),
+                }
+            }
+            "type" => {
+                let accepts = |name: &str| match name {
+                    "null" => value.is_null(),
+                    "boolean" => value.is_boolean(),
+                    "object" => value.is_object(),
+                    "array" => value.is_array(),
+                    "string" => value.is_string(),
+                    "number" => value.is_number(),
+                    "integer" => {
+                        value.is_i64()
+                            || value.is_u64()
+                            || value.as_f64().is_some_and(|n| n.fract() == 0.0)
+                    }
+                    _ => false,
+                };
+                let ok = match rule {
+                    Value::String(name) => accepts(name),
+                    Value::Array(names) => names.iter().filter_map(Value::as_str).any(accepts),
+                    _ => false,
+                };
+                if !ok {
+                    errors.push(format!("{path}: expected type {rule}, got {value}"));
+                }
+            }
+            "enum" => {
+                if !rule.as_array().is_some_and(|items| items.contains(value)) {
+                    errors.push(format!("{path}: {value} not in enum {rule}"));
+                }
+            }
+            "const" => {
+                if rule != value {
+                    errors.push(format!("{path}: {value} != const {rule}"));
+                }
+            }
+            "properties" => {
+                if let (Some(properties), Some(object)) = (rule.as_object(), value.as_object()) {
+                    for (key, property) in properties {
+                        if let Some(field) = object.get(key) {
+                            schema_errors(root, property, field, &format!("{path}/{key}"), errors);
+                        }
+                    }
+                }
+            }
+            "required" => {
+                if let Some(object) = value.as_object() {
+                    for key in rule
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        if !object.contains_key(key) {
+                            errors.push(format!("{path}: missing required {key}"));
+                        }
+                    }
+                }
+            }
+            "additionalProperties" => {
+                if let Some(object) = value.as_object() {
+                    let declared = schema.get("properties").and_then(Value::as_object);
+                    for (key, field) in object {
+                        if !declared.is_some_and(|declared| declared.contains_key(key)) {
+                            schema_errors(root, rule, field, &format!("{path}/{key}"), errors);
+                        }
+                    }
+                }
+            }
+            "items" => {
+                if let Some(items) = value.as_array() {
+                    for (index, item) in items.iter().enumerate() {
+                        schema_errors(root, rule, item, &format!("{path}/{index}"), errors);
+                    }
+                }
+            }
+            "anyOf" | "oneOf" | "allOf" => {
+                let branches = rule.as_array().map(Vec::as_slice).unwrap_or_default();
+                let passed = branches.iter().filter(|branch| matches(branch)).count();
+                let ok = match keyword.as_str() {
+                    "anyOf" => passed >= 1,
+                    "oneOf" => passed == 1,
+                    _ => passed == branches.len(),
+                };
+                if !ok {
+                    errors.push(format!("{path}: {keyword} matched {passed} branches"));
+                }
+            }
+            "minimum" | "maximum" => {
+                if let (Some(limit), Some(n)) = (number(keyword), value.as_f64()) {
+                    let ok = if keyword == "minimum" {
+                        n >= limit
+                    } else {
+                        n <= limit
+                    };
+                    if !ok {
+                        errors.push(format!("{path}: {n} violates {keyword} {limit}"));
+                    }
+                }
+            }
+            "minItems" | "maxItems" => {
+                if let (Some(limit), Some(items)) = (number(keyword), value.as_array()) {
+                    let len = items.len() as f64;
+                    let ok = if keyword == "minItems" {
+                        len >= limit
+                    } else {
+                        len <= limit
+                    };
+                    if !ok {
+                        errors.push(format!("{path}: {len} items violates {keyword} {limit}"));
+                    }
+                }
+            }
+            other => errors.push(format!("{path}: unsupported schema keyword {other}")),
+        }
+    }
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn schema_validator_rejects_mismatches_and_unknown_keywords() {
+    use serde_json::json;
+    let schema = json!({
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+            "kind": {"$ref": "#/$defs/Kind"},
+            "count": {"type": ["integer", "null"], "minimum": 0},
+            "tags": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false,
+        "$defs": {"Kind": {"enum": ["parameter", "criterion"]}}
+    });
+    let check = |value: serde_json::Value| {
+        let mut errors = Vec::new();
+        schema_errors(&schema, &schema, &value, "", &mut errors);
+        errors.len()
+    };
+    assert_eq!(
+        check(json!({"kind": "parameter", "count": null, "tags": ["a"]})),
+        0
+    );
+    assert_eq!(check(json!({"count": 1})), 1);
+    assert_eq!(check(json!({"kind": "device"})), 1);
+    assert_eq!(check(json!({"kind": "criterion", "count": -1})), 1);
+    assert_eq!(check(json!({"kind": "criterion", "tags": [1]})), 1);
+    assert_eq!(check(json!({"kind": "criterion", "extra": true})), 1);
+    let unknown = json!({"patternProperties": {}});
+    let mut errors = Vec::new();
+    schema_errors(&unknown, &unknown, &json!({}), "", &mut errors);
+    assert_eq!(errors.len(), 1);
+}
+
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn mcp_tools_declare_titles_and_object_output_schemas_their_results_satisfy() -> Result<()> {
@@ -2356,12 +2545,8 @@ async fn mcp_tools_declare_titles_and_object_output_schemas_their_results_satisf
             .structured_content
             .unwrap_or_else(|| panic!("{name} returned no structuredContent"));
         assert!(content.is_object(), "{name}: {content}");
-        let validator = jsonschema::validator_for(&schemas[name])
-            .map_err(|error| script_audit_mcp::Error::Knowledge(format!("{name}: {error}")))?;
-        let errors: Vec<_> = validator
-            .iter_errors(&content)
-            .map(|error| error.to_string())
-            .collect();
+        let mut errors = Vec::new();
+        schema_errors(&schemas[name], &schemas[name], &content, "", &mut errors);
         assert!(errors.is_empty(), "{name}: {errors:?}\n{content}");
     }
     assert!(saw_error, "the error envelope must be covered");
