@@ -99,13 +99,17 @@ agent does not access Ubuntu or the production/deployment database.
 | `suggest_criteria` | `device`, `function`, optional `device_scope`; returns known criteria and examples |
 | `compose_line` | `device`, `function`, `params`, `criteria`, `timeout`, optional `device_scope`, `pass_path`, `fail_path`, `error_code`, `param_sections`, `criteria_sections` |
 | `validate_line` | `line`, optional `device_scope`; returns `valid`, `invalid`, or `incomplete`, original segments, and diagnostics |
+| `autofix_line` | `line`, optional `device_scope`; previews unambiguous DLL prefix corrections and validates the resulting line |
 | `validate_ini_bundle` | `files`, `selected_flow`, `dialect`, optional `device_scope`, `runtime_bindings`, `sensitive_values`; returns preserved source and layered bundle findings |
+| `autofix_ini_bundle` | Same arguments as `validate_ini_bundle`; returns original and corrected files, device changes, and bundle validation |
 | `compare_plan_to_bundle` | `bundle` (the validation arguments), `plan`, explicit `flow_variant` (`normal` or `sampling`); returns sourced coverage, conflicts, blockers, and the shared validation report |
 | `compose_ini_bundle` | `comparison` (plan-comparison arguments), `flow_anchor`, optional `review`, `draft_approval`, `template_pack`, `procedure_templates`, `station_settings`, `report_metadata`; returns a read-only INI draft preview |
 
 Every tool declares a `title`, `read_only_hint`, and an `outputSchema` that its `structuredContent` satisfies. `initialize` returns server `instructions` describing the discovery workflow.
 
 Prompt and resource listings and resource reads include private, zero-lifetime cache hints, as required by MCP protocol version `2026-07-28`. Clients respecting these hints do not reuse cached catalog-backed resources.
+
+The autofix tools currently correct only missing `DLL` prefixes for an unambiguous Interface and a known Function. Exact built-in devices win, supported DLL mode suffixes are preserved, and other issues remain in validation diagnostics. Previews never write files or execute scripts; a corrected preview can still be invalid or incomplete and requires review.
 
 ### Resources
 

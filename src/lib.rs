@@ -1,3 +1,4 @@
+mod autofix;
 pub mod bundle;
 pub mod devices;
 pub mod discovery;

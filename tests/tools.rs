@@ -2438,7 +2438,7 @@ async fn mcp_tools_declare_titles_and_object_output_schemas_their_results_satisf
     let failed = |error: rmcp::ErrorData| script_audit_mcp::Error::Knowledge(error.to_string());
 
     let tools = McpServer::tool_router().list_all();
-    assert_eq!(tools.len(), 18);
+    assert_eq!(tools.len(), 20);
     let mut schemas = BTreeMap::new();
     for tool in &tools {
         assert!(
@@ -2528,6 +2528,18 @@ async fn mcp_tools_declare_titles_and_object_output_schemas_their_results_satisf
             "validate_line",
             server
                 .validate_line(args(json!({"line": "SSH|OPEN|DUT@echo|NULL|1"}))?)
+                .await,
+        ),
+        (
+            "autofix_line",
+            server
+                .autofix_line(args(json!({"line": "WIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|"}))?)
+                .await,
+        ),
+        (
+            "autofix_ini_bundle",
+            server
+                .autofix_ini_bundle(args(bundle_arguments("[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nSTEP=\"WIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|\"\n"))?)
                 .await,
         ),
         (
@@ -2766,6 +2778,110 @@ impl McpSession {
             .await
             .map_err(|error| script_audit_mcp::Error::Knowledge(error.to_string()))?
     }
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_autofix_bundle_previews_only_script_rows() -> Result<()> {
+    use serde_json::json;
+
+    let mut session = McpSession::start().await?;
+    let source = concat!(
+        "; WIFI_TEST| unchanged\r\n",
+        "[TEST FLOW:Normal]\r\nRUN=\"RUN\"\r\n[RUN]\r\n",
+        "STEP=\"WIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|\"\r\n"
+    );
+    let result = session
+        .call_tool(
+            "autofix_ini_bundle",
+            json!({
+                "files": [{"name": "MAIN_FLOW.ini", "text": source}],
+                "selected_flow": "[TEST FLOW:Normal]", "dialect": "hh5k"
+            }),
+        )
+        .await?;
+    assert_eq!(result["original_files"][0]["text"], source);
+    assert_eq!(
+        result["corrected_files"][0]["text"],
+        source.replace("STEP=\"WIFI_TEST|", "STEP=\"DLLWIFI_TEST|")
+    );
+    assert_eq!(result["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(result["changes"][0]["line"], 5);
+    assert!(result["validation"]["status"].is_string());
+
+    let main = "[TEST FLOW:Normal]\nRUN=\"RUN\"\n[RUN]\nSTEP=\"WIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|\"";
+    let macros = "[MACRO_X]\r\nSTEP = \"WIFI_TEST#PROXY|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|\"\r\n";
+    let result = session
+        .call_tool(
+            "autofix_ini_bundle",
+            json!({
+                "files": [
+                    {"name": "MAIN_FLOW.ini", "text": main},
+                    {"name": "MACRO_LIST.ini", "text": macros},
+                    {"name": "PARAMETER_LIST.ini", "text": "PASSWORD=WIFI_TEST|unchanged\n"}
+                ],
+                "selected_flow": "[TEST FLOW:Normal]", "dialect": "hh5k"
+            }),
+        )
+        .await?;
+    assert_eq!(result["changes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        result["corrected_files"][0]["text"],
+        main.replacen("WIFI_TEST|", "DLLWIFI_TEST|", 1)
+    );
+    assert_eq!(
+        result["corrected_files"][1]["text"],
+        macros.replacen("WIFI_TEST#", "DLLWIFI_TEST#", 1)
+    );
+    assert_eq!(
+        result["corrected_files"][2]["text"],
+        "PASSWORD=WIFI_TEST|unchanged\n"
+    );
+    session.finish().await
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_autofix_line_previews_unambiguous_dll_device() -> Result<()> {
+    use serde_json::json;
+
+    let mut session = McpSession::start().await?;
+    let line = "WIFI_TEST|TX_MULTI_VERIFICATION|ANT=15,2|NULL|20000|NEXT|FAIL|";
+    let result = session
+        .call_tool("autofix_line", json!({"line": line}))
+        .await?;
+    assert_eq!(result["original"], line);
+    assert_eq!(result["corrected"], format!("DLL{line}"));
+    assert_eq!(result["changed"], true);
+    assert_eq!(result["validation"]["status"], "valid");
+
+    let quick = line.replacen("WIFI_TEST|", "WIFI_TEST#QUICK|", 1);
+    let result = session
+        .call_tool("autofix_line", json!({"line": quick}))
+        .await?;
+    assert_eq!(result["corrected"], format!("DLL{quick}"));
+    assert_eq!(result["validation"]["status"], "valid");
+
+    for unchanged in [
+        format!("DLL{line}"),
+        line.replacen("WIFI_TEST|", "WIFI_TEST#UNKNOWN|", 1),
+        line.replacen("TX_MULTI_VERIFICATION", "NO_SUCH_FUNCTION", 1),
+        format!(";{line}"),
+    ] {
+        let result = session
+            .call_tool("autofix_line", json!({"line": unchanged}))
+            .await?;
+        assert_eq!(result["corrected"], unchanged);
+        assert_eq!(result["changed"], false);
+    }
+
+    let builtin = "SSH|OPEN|console@payload|NULL|1000";
+    let result = session
+        .call_tool("autofix_line", json!({"line": builtin}))
+        .await?;
+    assert_eq!(result["corrected"], builtin);
+    assert_eq!(result["changed"], false);
+    session.finish().await
 }
 
 #[cfg(feature = "mcp")]
@@ -3219,8 +3335,8 @@ async fn mcp_protocol_advertises_and_dispatches_tools() -> Result<()> {
         let listed = receive(&mut input).await?;
         let tools = listed["result"]["tools"].as_array()
             .ok_or_else(|| script_audit_mcp::Error::Knowledge("missing tool discovery result".into()))?;
-        assert_eq!(tools.len(), 18);
-        for name in ["catalog_info", "list_devices", "get_device", "list_function_fields", "get_definition", "find_functions_using", "search_catalog", "list_examples", "parse_line", "list_functions", "get_function", "get_function_readiness", "suggest_criteria", "compose_line", "validate_line", "validate_ini_bundle", "compare_plan_to_bundle", "compose_ini_bundle"] {
+        assert_eq!(tools.len(), 20);
+        for name in ["catalog_info", "list_devices", "get_device", "list_function_fields", "get_definition", "find_functions_using", "search_catalog", "list_examples", "parse_line", "list_functions", "get_function", "get_function_readiness", "suggest_criteria", "compose_line", "validate_line", "validate_ini_bundle", "autofix_line", "autofix_ini_bundle", "compare_plan_to_bundle", "compose_ini_bundle"] {
             assert!(tools.iter().any(|tool| tool["name"] == name && tool["annotations"]["readOnlyHint"] == true));
         }
         // deploy/update.sh fails release verification when the smoke script's tool set drifts.

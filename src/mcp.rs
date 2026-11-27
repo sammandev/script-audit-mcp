@@ -30,7 +30,7 @@ Recommended order:
 1. `catalog_info` for the contract and cache revision; `list_devices` and `get_device` to find a Script device.
 2. `list_functions`, `search_catalog`, or `get_function_readiness` to choose a ready Function.
 3. `get_function` (or `list_function_fields`, `get_definition`) for parameters, criteria, and Examples; `suggest_criteria` and `list_examples` for patterns.
-4. `compose_line` to build a line, then `validate_line` or `parse_line` to check one. For INI files use `validate_ini_bundle`, `compose_ini_bundle`, and `compare_plan_to_bundle`.
+4. `compose_line` to build a line, then `validate_line` or `parse_line` to check one. Use `autofix_line` or `autofix_ini_bundle` for a read-only correction preview. For INI files use `validate_ini_bundle`, `compose_ini_bundle`, and `compare_plan_to_bundle`.
 
 Resources: read `docs://script-grammar`, `docs://script-devices`, and `docs://ini-bundle-dialects` for the line and bundle rules. `catalog://` resources (see resources/templates/list) return the same JSON as the matching discovery tools.
 
@@ -554,6 +554,29 @@ impl McpServer {
     }
 
     #[tool(
+        title = "Autofix Script Line",
+        output_schema = output_schema::<crate::autofix::LinePreview>(),
+        description = "Preview unambiguous Script device corrections and validate the resulting line. Never writes or executes scripts.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn autofix_line(
+        &self,
+        Parameters(request): Parameters<ValidateLineRequest>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        self.invoke_on(
+            |catalog| catalog.snapshot_without_examples(),
+            move |engine| {
+                Ok(crate::autofix::line(
+                    &engine,
+                    &request.line,
+                    request.device_scope.as_deref(),
+                ))
+            },
+        )
+        .await
+    }
+
+    #[tool(
         title = "Validate Script Line",
         output_schema = output_schema::<crate::model::ValidationReport>(),
         description = "Check a script line against scoped knowledge. Report valid, invalid, or incomplete and preserve original fields; historical seven/nine-field lines warn. Runtime references are never resolved.",
@@ -632,6 +655,26 @@ impl McpServer {
         self.invoke_catalog(move |catalog| {
             request.validate(|| catalog.snapshot_without_examples().map(Engine::new))
         })
+        .await
+    }
+
+    #[tool(
+        title = "Autofix INI Bundle",
+        output_schema = output_schema::<rmcp::model::JsonObject>(),
+        description = "Preview unambiguous Script device corrections in supplied INI files and validate the resulting bundle. Never writes or executes scripts.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn autofix_ini_bundle(
+        &self,
+        Parameters(request): Parameters<crate::bundle::ValidateBundleRequest>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        if let Err(error) = request.clone().prepare() {
+            return Ok(domain_error(error));
+        }
+        self.invoke_on(
+            |catalog| catalog.snapshot_without_examples(),
+            move |engine| crate::autofix::bundle(&engine, request),
+        )
         .await
     }
 

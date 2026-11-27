@@ -396,7 +396,7 @@ bash deploy/debug.sh
 # Or explicitly include an earlier period:
 bash deploy/debug.sh '30 minutes ago'
 
-# Initialize, discover all 18 tools, check proxy rejections, close the session.
+# Initialize, discover all 20 tools, check proxy rejections, close the session.
 bash deploy/mcp-smoke.sh
 
 # Optional operator-approved tool call; use arguments from its current schema.
@@ -442,7 +442,7 @@ the recovery backup if needed.
 Post-restart verification retries up to ten times, two seconds apart. Each HTTP
 request has a 20-second timeout. It verifies the exact listener addresses,
 JSON-RPC initialization, negotiated protocol version, initialization notification,
-all 18 tool names (`EXPECTED_TOOLS` in `mcp_smoke.py`; `cargo test` fails if it
+all 20 tool names (`EXPECTED_TOOLS` in `mcp_smoke.py`; `cargo test` fails if it
 drifts from the server's `tools/list`), and untrusted Host/Origin rejection. Smoke sessions are
 terminated even after a check failure. Optional tool calls print their results
 and fail on MCP tool errors, but do not certify validation semantics, draft

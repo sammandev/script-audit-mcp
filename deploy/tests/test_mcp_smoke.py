@@ -94,14 +94,14 @@ class SmokeTests(unittest.TestCase):
     def test_missing_tool_fails_and_cleans_up(self):
         client = FakeClient()
         client.tools.pop()
-        with self.assertRaisesRegex(ValueError, r"18 expected tools \(received 17; missing: \w+"):
+        with self.assertRaisesRegex(ValueError, r"20 expected tools \(received 19; missing: \w+"):
             self.run_check(client)
         self.assertEqual(client.calls[-1][0], "DELETE")
 
     def test_duplicate_tool_fails(self):
         client = FakeClient()
         client.tools.append(client.tools[0])
-        with self.assertRaisesRegex(ValueError, "18 expected tools"):
+        with self.assertRaisesRegex(ValueError, "20 expected tools"):
             self.run_check(client)
 
     def test_bad_notification_status(self):
