@@ -67,6 +67,21 @@ use the approved company mirror/proxy; keep TLS verification enabled. The host
 otherwise builds only from its local Cargo cache, so any `Cargo.lock` change
 (including new dev-dependencies, whose index entries are still resolved) fails
 with `unable to update registry crates-io` until a mirror/proxy is arranged.
+
+To route cargo through the approved company proxy, create a private profile
+once on the host (`deploy/.env.proxy` is git-ignored):
+
+```sh
+install -m 600 deploy/.env.proxy.example deploy/.env.proxy
+editor deploy/.env.proxy   # set http_proxy/https_proxy; percent-encode $ @ % in credentials
+./deploy/update.sh
+```
+
+`build.sh` (also run by `update.sh`) loads it only for the cargo build, rejects
+it unless it is mode 600 with no `replace_me` placeholder, and never prints its
+values. The service, smoke checks and Nginx never receive these settings.
+Prefer a dedicated service account over personal credentials.
+
 Never
 enable `legacy-sqlite`. This build uses database client libraries, not an engine.
 
@@ -381,7 +396,7 @@ bash deploy/debug.sh
 # Or explicitly include an earlier period:
 bash deploy/debug.sh '30 minutes ago'
 
-# Initialize, discover all eight tools, check proxy rejections, close the session.
+# Initialize, discover all 18 tools, check proxy rejections, close the session.
 bash deploy/mcp-smoke.sh
 
 # Optional operator-approved tool call; use arguments from its current schema.
@@ -427,7 +442,8 @@ the recovery backup if needed.
 Post-restart verification retries up to ten times, two seconds apart. Each HTTP
 request has a 20-second timeout. It verifies the exact listener addresses,
 JSON-RPC initialization, negotiated protocol version, initialization notification,
-all eight tool names, and untrusted Host/Origin rejection. Smoke sessions are
+all 18 tool names (`EXPECTED_TOOLS` in `mcp_smoke.py`; `cargo test` fails if it
+drifts from the server's `tools/list`), and untrusted Host/Origin rejection. Smoke sessions are
 terminated even after a check failure. Optional tool calls print their results
 and fail on MCP tool errors, but do not certify validation semantics, draft
 approval, or hardware behavior. Review tool results locally before sharing;

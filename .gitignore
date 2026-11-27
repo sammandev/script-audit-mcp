@@ -10,6 +10,7 @@
 # Environment / secrets (database credentials live outside the repo)
 .env
 .env.*
+!deploy/.env.proxy.example
 
 # Editors / OS junk
 .idea

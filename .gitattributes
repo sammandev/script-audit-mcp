@@ -2,3 +2,4 @@ deploy/*.sh text eol=lf
 deploy/*.py text eol=lf
 deploy/tests/*.sh text eol=lf
 deploy/tests/*.py text eol=lf
+deploy/.env.proxy.example text eol=lf

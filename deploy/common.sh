@@ -16,6 +16,7 @@ NGINX_ENABLED_SITE=/etc/nginx/sites-enabled/script-audit-mcp
 BACKUP_ROOT="$INSTALL_DIR/backups"
 PUBLIC_LISTENER=10.176.2.139:39064
 PRIVATE_LISTENER=127.0.0.1:39065
+BUILD_PROXY_FILE="$DEPLOY_DIR/.env.proxy"
 # shellcheck source=deploy/ui.sh
 source "$DEPLOY_DIR/ui.sh"
 
@@ -42,6 +43,22 @@ require_commands() {
 require_smoke_runtime() {
     require_commands python3 curl
     python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "ERROR: Python 3.10 or newer is required.")'
+}
+
+# Loads the private proxy profile into the calling build process only. Values are
+# never printed; without the file, exported shell proxy settings still apply.
+load_build_proxy() {
+    [[ -f "$BUILD_PROXY_FILE" ]] || return 0
+    [[ "$(stat -c '%a' -- "$BUILD_PROXY_FILE")" == 600 ]] ||
+        fail 'Protect deploy/.env.proxy with chmod 600.'
+    ! grep -Eq '^[^#]*replace_me' "$BUILD_PROXY_FILE" ||
+        fail 'Replace the proxy placeholder privately in deploy/.env.proxy.'
+    unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy CARGO_HTTP_PROXY
+    set -a
+    # shellcheck source=/dev/null
+    . "$BUILD_PROXY_FILE"
+    set +a
+    ok 'Loaded private build proxy settings from deploy/.env.proxy.'
 }
 
 operator_only() {

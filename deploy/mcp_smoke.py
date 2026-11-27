@@ -9,10 +9,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# Must match the server's tools/list; tests/tools.rs fails when the two drift.
 EXPECTED_TOOLS = {
-    "list_functions", "get_function", "suggest_criteria", "compose_line",
-    "validate_line", "validate_ini_bundle", "compare_plan_to_bundle",
-    "compose_ini_bundle",
+    "catalog_info", "list_devices", "get_device", "list_function_fields",
+    "get_definition", "find_functions_using", "search_catalog", "list_examples",
+    "parse_line", "list_functions", "get_function", "get_function_readiness",
+    "suggest_criteria", "compose_line", "validate_line", "validate_ini_bundle",
+    "compare_plan_to_bundle", "compose_ini_bundle",
 }
 
 
@@ -128,7 +131,13 @@ def check(client: Client, tool: str | None, arguments: dict[str, Any]) -> None:
             raise ValueError("tools/list returned an invalid tool list.")
         names = {item["name"] for item in tools}
         if names != EXPECTED_TOOLS or len(tools) != len(EXPECTED_TOOLS):
-            raise ValueError("Tool discovery does not match the eight expected tools.")
+            missing = sorted(EXPECTED_TOOLS - names)
+            unexpected = sorted(names - EXPECTED_TOOLS)
+            raise ValueError(
+                f"Tool discovery does not match the {len(EXPECTED_TOOLS)} expected tools "
+                f"(received {len(tools)}; missing: {', '.join(missing) or 'none'}; "
+                f"unexpected: {', '.join(unexpected) or 'none'})."
+            )
         print(f"[ OK ] Tool discovery: all {len(EXPECTED_TOOLS)} expected tools are present.")
         print(f"       {', '.join(sorted(names))}")
         if tool:

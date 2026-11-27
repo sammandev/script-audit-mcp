@@ -14,6 +14,7 @@ fi
 detail Toolchain "$(rustc --version)"
 detail '' "$(cargo --version)"
 detail Features 'database, mcp, http (locked dependencies)'
+load_build_proxy
 info 'Compiling; this can take a minute...'
 run_indented cargo build --locked --release --no-default-features --features database,mcp,http
 ARTIFACT="$PROJECT_DIR/target/release/script-audit-mcp"

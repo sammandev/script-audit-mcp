@@ -109,4 +109,28 @@ unset -f bash sleep
 [[ "$output" != *'[FAIL]'* && "$output" != *ERROR* ]]
 [[ "$output" == *'nginx (2 processes)'* && "$output" == *'mocked smoke check'* ]]
 echo 'PASS: transient listener startup is reported as a retry, not a failure'
+
+PROXY_DIR="$(mktemp -d)"
+BUILD_PROXY_FILE="$PROXY_DIR/.env.proxy"
+output="$(NO_PROXY=inherited; load_build_proxy; printf '%s' "$NO_PROXY")"
+[[ "$output" == inherited ]]
+echo 'PASS: missing proxy profile keeps inherited shell settings'
+printf "https_proxy='http://user:s3cret%%24@proxy.invalid:80'\n" >"$BUILD_PROXY_FILE"
+chmod 600 "$BUILD_PROXY_FILE"
+output="$(NO_PROXY=inherited; load_build_proxy; bash -c 'printf "|%s|%s|" "$https_proxy" "${NO_PROXY:-unset}"')"
+[[ "$output" == *'|http://user:s3cret%24@proxy.invalid:80|unset|' ]]
+[[ "${output%%|*}" != *s3cret* ]]
+echo 'PASS: private proxy profile is exported to cargo, replaces inherited settings, and is not printed'
+chmod 644 "$BUILD_PROXY_FILE"
+if (load_build_proxy) >/dev/null 2>&1; then
+    fail 'World-readable proxy profile was accepted.'
+fi
+echo 'PASS: proxy profile without mode 600 rejected'
+printf "https_proxy='replace_me'\n" >"$BUILD_PROXY_FILE"
+chmod 600 "$BUILD_PROXY_FILE"
+if (load_build_proxy) >/dev/null 2>&1; then
+    fail 'Placeholder proxy profile was accepted.'
+fi
+echo 'PASS: placeholder proxy profile rejected'
+rm -rf -- "$PROXY_DIR"
 echo 'All shell helper tests passed.'

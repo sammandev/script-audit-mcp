@@ -3158,6 +3158,16 @@ async fn mcp_protocol_advertises_and_dispatches_tools() -> Result<()> {
         for name in ["catalog_info", "list_devices", "get_device", "list_function_fields", "get_definition", "find_functions_using", "search_catalog", "list_examples", "parse_line", "list_functions", "get_function", "get_function_readiness", "suggest_criteria", "compose_line", "validate_line", "validate_ini_bundle", "compare_plan_to_bundle", "compose_ini_bundle"] {
             assert!(tools.iter().any(|tool| tool["name"] == name && tool["annotations"]["readOnlyHint"] == true));
         }
+        // deploy/update.sh fails release verification when the smoke script's tool set drifts.
+        let smoke = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/mcp_smoke.py"))?;
+        let smoke_tools: std::collections::BTreeSet<&str> = smoke
+            .split_once("EXPECTED_TOOLS = {")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(body, _)| body.split('"').skip(1).step_by(2).collect())
+            .unwrap_or_default();
+        let served_tools: std::collections::BTreeSet<&str> = tools.iter()
+            .filter_map(|tool| tool["name"].as_str()).collect();
+        assert_eq!(smoke_tools, served_tools, "deploy/mcp_smoke.py EXPECTED_TOOLS must match tools/list");
         assert!(tools.iter().any(|tool| tool["name"] == "compose_ini_bundle"
             && tool["inputSchema"]["properties"]["procedure_templates"].is_object()));
         assert!(tools.iter().any(|tool| tool["name"] == "compose_ini_bundle"
