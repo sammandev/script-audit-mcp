@@ -48,10 +48,15 @@ impl ServerHandler for McpServer {
                 .enable_prompts()
                 .build(),
         )
-        .with_server_info(rmcp::model::Implementation::new(
-            "Script Audit",
-            env!("CARGO_PKG_VERSION"),
-        ))
+        .with_server_info(
+            rmcp::model::Implementation::new("Script Audit", env!("CARGO_PKG_VERSION")).with_icons(
+                vec![
+                    rmcp::model::Icon::new(include_str!("../resources/server-icon.data-uri"))
+                        .with_mime_type("image/png")
+                        .with_sizes(vec!["480x480".into()]),
+                ],
+            ),
+        )
         .with_instructions(INSTRUCTIONS.to_string())
     }
 

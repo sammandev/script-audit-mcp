@@ -2770,6 +2770,26 @@ impl McpSession {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn mcp_initialize_includes_server_icon() -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let session = McpSession::start().await?;
+    let icon = &session.initialized["result"]["serverInfo"]["icons"][0];
+    assert_eq!(icon["mimeType"], "image/png");
+    let source = icon["src"].as_str().unwrap_or_default();
+    assert!(source.starts_with("data:image/png;base64,"));
+    assert_eq!(
+        Sha256::digest(source.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "2cd7a82a70acd27b86f24f518b4abcc3a3740ddfaa12482205611b3be242ead9"
+    );
+    session.finish().await
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn mcp_catalog_resources_mirror_their_tools() -> Result<()> {
     use serde_json::json;
 
