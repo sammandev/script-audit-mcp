@@ -65,9 +65,11 @@ impl ServerHandler for McpServer {
         _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<rmcp::model::ListResourcesResult, ErrorData> {
-        Ok(rmcp::model::ListResourcesResult::with_all_items(
-            resources::list(),
-        ))
+        Ok(
+            rmcp::model::ListResourcesResult::with_all_items(resources::list())
+                .with_ttl_ms(0)
+                .with_cache_scope(rmcp::model::CacheScope::Private),
+        )
     }
 
     async fn list_resource_templates(
@@ -75,9 +77,11 @@ impl ServerHandler for McpServer {
         _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<rmcp::model::ListResourceTemplatesResult, ErrorData> {
-        Ok(rmcp::model::ListResourceTemplatesResult::with_all_items(
-            resources::templates(),
-        ))
+        Ok(
+            rmcp::model::ListResourceTemplatesResult::with_all_items(resources::templates())
+                .with_ttl_ms(0)
+                .with_cache_scope(rmcp::model::CacheScope::Private),
+        )
     }
 
     async fn read_resource(
@@ -85,7 +89,12 @@ impl ServerHandler for McpServer {
         request: rmcp::model::ReadResourceRequestParams,
         _: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<rmcp::model::ReadResourceResponse, ErrorData> {
-        resources::read(self, &request.uri).await.map(Into::into)
+        resources::read(self, &request.uri).await.map(|result| {
+            result
+                .with_ttl_ms(0)
+                .with_cache_scope(rmcp::model::CacheScope::Private)
+                .into()
+        })
     }
 
     async fn list_prompts(
@@ -93,9 +102,11 @@ impl ServerHandler for McpServer {
         _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<rmcp::model::ListPromptsResult, ErrorData> {
-        Ok(rmcp::model::ListPromptsResult::with_all_items(
-            prompts::list(),
-        ))
+        Ok(
+            rmcp::model::ListPromptsResult::with_all_items(prompts::list())
+                .with_ttl_ms(0)
+                .with_cache_scope(rmcp::model::CacheScope::Private),
+        )
     }
 
     async fn get_prompt(

@@ -2770,6 +2770,51 @@ impl McpSession {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
+async fn mcp_modern_cacheable_results_include_private_zero_ttl() -> Result<()> {
+    use serde_json::json;
+
+    let mut session = McpSession::start().await?;
+    let metadata = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let discovery = session
+        .request("server/discover", json!({"_meta": metadata}))
+        .await?;
+    assert!(
+        discovery["result"]["supportedVersions"]
+            .as_array()
+            .is_some_and(|versions| versions.contains(&json!("2026-07-28"))),
+        "{discovery}"
+    );
+    let tools = session
+        .request("tools/list", json!({"_meta": metadata}))
+        .await?;
+    assert_eq!(tools["result"]["ttlMs"], 0);
+    assert_eq!(tools["result"]["cacheScope"], "public");
+    for (method, mut params) in [
+        ("prompts/list", json!({})),
+        ("resources/list", json!({})),
+        ("resources/templates/list", json!({})),
+        ("resources/read", json!({"uri":"docs://script-grammar"})),
+    ] {
+        params["_meta"] = metadata.clone();
+        let response = session.request(method, params).await?;
+        assert_eq!(
+            response["result"]["resultType"], "complete",
+            "{method}: {response}"
+        );
+        assert_eq!(response["result"]["ttlMs"], 0, "{method}: {response}");
+        assert_eq!(
+            response["result"]["cacheScope"], "private",
+            "{method}: {response}"
+        );
+    }
+    session.finish().await
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
 async fn mcp_initialize_includes_server_icon() -> Result<()> {
     use sha2::{Digest, Sha256};
 

@@ -105,6 +105,8 @@ agent does not access Ubuntu or the production/deployment database.
 
 Every tool declares a `title`, `read_only_hint`, and an `outputSchema` that its `structuredContent` satisfies. `initialize` returns server `instructions` describing the discovery workflow.
 
+Prompt and resource listings and resource reads include private, zero-lifetime cache hints, as required by MCP protocol version `2026-07-28`. Clients respecting these hints do not reuse cached catalog-backed resources.
+
 ### Resources
 
 | URI | Contents |
